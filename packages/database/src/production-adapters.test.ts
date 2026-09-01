@@ -1,8 +1,15 @@
 import { ObjectId } from "mongodb";
 import { describe, expect, it } from "vitest";
-import { inferredMongoCollections, mongoExtendedJson, mongoNativeType, profileMongoDocuments } from "./production-adapters.js";
+import { inferredMongoCollections, isMongoSystemCollection, isMongoSystemNamespace, mongoExtendedJson, mongoNativeType, profileMongoDocuments } from "./production-adapters.js";
 
 describe("gateway MongoDB value normalization", () => {
+  it("identifies MongoDB system namespaces and collections", () => {
+    expect(["admin", "config", "local"].every(isMongoSystemNamespace)).toBe(true);
+    expect(isMongoSystemNamespace("app")).toBe(false);
+    expect(isMongoSystemCollection("system.keys")).toBe(true);
+    expect(isMongoSystemCollection("users")).toBe(false);
+  });
+
   it("preserves BSON identity and date types as Extended JSON", () => {
     const value = mongoExtendedJson({
       _id: new ObjectId("507f1f77bcf86cd799439011"),

@@ -16,6 +16,7 @@ import { formatCompactCount } from "./lib/format-count";
 import { clampGridCell, gridCellSelected, gridRange, gridSelectionToTsv, moveGridCell, type GridCell } from "./lib/grid-selection";
 import { orderPinnedColumns, pinnedColumnOffsets } from "./lib/column-pinning";
 import { closeExploreTab as closeExploreTabState, cycleExploreTab, exploreTabId, openExploreTab, type ExploreTab, type ExploreTabTarget, type ExploreTabWorkspace } from "./lib/explore-tabs";
+import { isMongoSystemCollection, isMongoSystemNamespace, restoreMongoObjectKey, visibleMongoNamespaces, visibleMongoObjects } from "./lib/mongo-visibility";
 
 type Section = "explore" | "ask" | "views";
 type DocumentCountState = { key: string; loading: boolean; result?: DocumentCountResult; error?: string };
@@ -32,7 +33,7 @@ const objectKey = (item: Pick<DataObject, "namespace" | "name">) => `${item.name
 const clampSidebarWidth = (width: number) => Math.min(320, Math.max(190, width));
 const exploreWorkspaceSignature = (workspace: ExploreTabWorkspace) => JSON.stringify([workspace.filters, workspace.sort, workspace.cursors, workspace.hidden, workspace.pinned, workspace.rowSearch]);
 const exploreDataQuerySignature = (connectionId: string, namespace: string, object: string, filters: ExploreFilter[], sort: ExploreSort[], cursor?: string) => JSON.stringify([connectionId, namespace, object, filters, sort, cursor ?? ""]);
-const readRecentExploreTargets = (mode: DatabaseTransportMode): ExploreTabTarget[] => { try { const value: unknown = JSON.parse(localStorage.getItem(`orbit.exploreRecent.${mode}`) ?? "[]"); if (!Array.isArray(value)) return []; return value.filter((item): item is ExploreTabTarget => Boolean(item && typeof item === "object" && "connectionId" in item && typeof item.connectionId === "string" && "connectionName" in item && typeof item.connectionName === "string" && "databaseKind" in item && ["mongodb", "postgres", "mysql"].includes(String(item.databaseKind)) && "namespace" in item && typeof item.namespace === "string" && "object" in item && typeof item.object === "string" && "objectKind" in item && ["collection", "table", "view"].includes(String(item.objectKind)))).slice(0, 10); } catch { return []; } };
+const readRecentExploreTargets = (mode: DatabaseTransportMode): ExploreTabTarget[] => { try { const value: unknown = JSON.parse(localStorage.getItem(`orbit.exploreRecent.${mode}`) ?? "[]"); if (!Array.isArray(value)) return []; return value.filter((item): item is ExploreTabTarget => Boolean(item && typeof item === "object" && "connectionId" in item && typeof item.connectionId === "string" && "connectionName" in item && typeof item.connectionName === "string" && "databaseKind" in item && ["mongodb", "postgres", "mysql"].includes(String(item.databaseKind)) && "namespace" in item && typeof item.namespace === "string" && "object" in item && typeof item.object === "string" && "objectKind" in item && ["collection", "table", "view"].includes(String(item.objectKind)))).filter((item) => item.databaseKind !== "mongodb" || (!isMongoSystemNamespace(item.namespace) && !isMongoSystemCollection(item.object))).slice(0, 10); } catch { return []; } };
 const mergeNamespaceObjects = (current: DataObject[], namespace: string, next: DataObject[]) => [...current.filter((item) => item.namespace !== namespace), ...next];
 const readObjectGroupCache = (mode: DatabaseTransportMode, connectionId: string, namespace: string) => { try { return parseObjectGroup(localStorage.getItem(objectGroupCacheKey(mode, connectionId, namespace))); } catch { return undefined; } };
 const writeObjectGroupCache = (mode: DatabaseTransportMode, connectionId: string, namespace: string, objects: DataObject[]) => { try { localStorage.setItem(objectGroupCacheKey(mode, connectionId, namespace), serializeObjectGroup(objects)); } catch { /* cache is optional */ } };
@@ -245,15 +246,15 @@ export function App() {
     setLoading(true); setError(undefined); setObjects([]); setNamespaces([]); setResult(undefined); setObjectGroupErrors({}); setLoadingObjectGroups(new Set()); loadedObjectGroups.current.clear();
     const applyResponse = (response: ObjectListResult, fromCache: boolean) => {
       if (!active) return;
-      const namespaceList = response.namespaces ?? [...new Set(response.objects.map((item) => item.namespace))];
       const mongoGroups = response.namespaces !== undefined;
+      const namespaceList = mongoGroups ? visibleMongoNamespaces(response.namespaces ?? []) : [...new Set(response.objects.map((item) => item.namespace))];
       const firstNamespace = namespaceList[0];
-      let combined = response.objects;
-      if (!fromCache) writeObjectSchemaCache(transportMode, connectionId, response);
+      let combined = mongoGroups ? visibleMongoObjects(response.objects) : response.objects;
+      if (!fromCache) writeObjectSchemaCache(transportMode, connectionId, mongoGroups ? { ...response, namespaces: namespaceList, objects: combined } : response);
       if (mongoGroups && firstNamespace) {
         const firstKey = `${transportMode}:${connectionId}:${firstNamespace}`;
         loadedObjectGroups.current.add(firstKey);
-        if (!fromCache) writeObjectGroupCache(transportMode, connectionId, firstNamespace, response.objects.filter((item) => item.namespace === firstNamespace));
+        if (!fromCache) writeObjectGroupCache(transportMode, connectionId, firstNamespace, combined.filter((item) => item.namespace === firstNamespace));
       }
       const expanded = mongoGroups ? readExpandedObjectGroups(transportMode, connectionId).filter((namespace) => namespaceList.includes(namespace)) : namespaceList;
       if (mongoGroups) {
@@ -262,12 +263,13 @@ export function App() {
           if (namespace === firstNamespace) continue;
           const cacheKey = `${transportMode}:${connectionId}:${namespace}`;
           const cached = readObjectGroupCache(transportMode, connectionId, namespace);
-          if (cached) { combined = mergeNamespaceObjects(combined, namespace, cached); loadedObjectGroups.current.add(cacheKey); continue; }
+          if (cached) { combined = mergeNamespaceObjects(combined, namespace, visibleMongoObjects(cached)); loadedObjectGroups.current.add(cacheKey); continue; }
           setLoadingObjectGroups((current) => new Set(current).add(cacheKey));
           void dbApi.objectsInNamespace(connectionId, namespace).then((result) => {
             if (!active || activeConnectionId.current !== connectionId) return;
-            loadedObjectGroups.current.add(cacheKey); writeObjectGroupCache(transportMode, connectionId, namespace, result.objects);
-            setObjects((current) => mergeNamespaceObjects(current, namespace, result.objects));
+            const visibleObjects = visibleMongoObjects(result.objects);
+            loadedObjectGroups.current.add(cacheKey); writeObjectGroupCache(transportMode, connectionId, namespace, visibleObjects);
+            setObjects((current) => mergeNamespaceObjects(current, namespace, visibleObjects));
           }).catch((reason: unknown) => { if (active) setObjectGroupErrors((current) => ({ ...current, [cacheKey]: reason instanceof Error ? reason.message : String(reason) })); }).finally(() => { if (active) setLoadingObjectGroups((current) => { const next = new Set(current); next.delete(cacheKey); return next; }); });
         }
       } else setCollapsedObjectGroups(new Set());
@@ -275,7 +277,7 @@ export function App() {
       const pendingObjectKey = transportMode === exploreTransport && pendingExploreObject.current ? objectKey(pendingExploreObject.current) : "";
       const preferredObject = pendingObjectKey || objectSelection.current[transportMode] || "";
       const current = combined.find((item) => objectKey(item) === preferredObject || item.name === preferredObject);
-      const key = current ? objectKey(current) : response.objects[0] ? objectKey(response.objects[0]) : "";
+      const key = mongoGroups ? restoreMongoObjectKey(combined, preferredObject) : current ? objectKey(current) : combined[0] ? objectKey(combined[0]) : "";
       if (pendingObjectKey && current) pendingExploreObject.current = undefined;
       objectSelection.current[transportMode] = key;
       if (key) localStorage.setItem(`orbit.object.${transportMode}`, key);
@@ -358,13 +360,14 @@ export function App() {
     if (!force && loadedObjectGroups.current.has(cacheKey)) return;
     if (!force) {
       const cached = readObjectGroupCache(transportMode, id, namespace);
-      if (cached) { loadedObjectGroups.current.add(cacheKey); setObjects((current) => mergeNamespaceObjects(current, namespace, cached)); return; }
+      if (cached) { loadedObjectGroups.current.add(cacheKey); setObjects((current) => mergeNamespaceObjects(current, namespace, visibleMongoObjects(cached))); return; }
     }
     setLoadingObjectGroups((current) => new Set(current).add(cacheKey)); setObjectGroupErrors((current) => { const next = { ...current }; delete next[cacheKey]; return next; });
     try {
       const response = await dbApi.objectsInNamespace(id, namespace);
       if (activeConnectionId.current !== id) return;
-      loadedObjectGroups.current.add(cacheKey); writeObjectGroupCache(transportMode, id, namespace, response.objects); setObjects((current) => mergeNamespaceObjects(current, namespace, response.objects));
+      const visibleObjects = visibleMongoObjects(response.objects);
+      loadedObjectGroups.current.add(cacheKey); writeObjectGroupCache(transportMode, id, namespace, visibleObjects); setObjects((current) => mergeNamespaceObjects(current, namespace, visibleObjects));
     } catch (reason) {
       if (activeConnectionId.current === id) setObjectGroupErrors((current) => ({ ...current, [cacheKey]: reason instanceof Error ? reason.message : String(reason) }));
     } finally {
@@ -378,20 +381,24 @@ export function App() {
     setRefreshingSchema(true); setError(undefined);
     try {
       const response = await dbApi.refreshSchema(id); documentCountCache.current.clear();
-      const namespaceList = response.namespaces ?? [...new Set(response.objects.map((item) => item.namespace))];
+      const mongoGroups = response.namespaces !== undefined;
+      const namespaceList = mongoGroups ? visibleMongoNamespaces(response.namespaces ?? []) : [...new Set(response.objects.map((item) => item.namespace))];
+      const visibleObjects = mongoGroups ? visibleMongoObjects(response.objects) : response.objects;
+      const visibleResponse = mongoGroups ? { ...response, namespaces: namespaceList, objects: visibleObjects } : response;
       try { localStorage.removeItem(objectSchemaCacheKey(transportMode, id)); } catch { /* cache is optional */ }
       for (const namespace of new Set([...namespaces, ...namespaceList])) { try { localStorage.removeItem(objectGroupCacheKey(transportMode, id, namespace)); } catch { /* cache is optional */ } }
-      writeObjectSchemaCache(transportMode, id, response);
-      loadedObjectGroups.current.clear(); setNamespaces(namespaceList); setObjects(response.objects); setObjectGroupErrors({});
-      if (response.namespaces) {
+      writeObjectSchemaCache(transportMode, id, visibleResponse);
+      loadedObjectGroups.current.clear(); setNamespaces(namespaceList); setObjects(visibleObjects); setObjectGroupErrors({});
+      if (mongoGroups) {
         const firstNamespace = namespaceList[0];
-        if (firstNamespace) { loadedObjectGroups.current.add(`${transportMode}:${id}:${firstNamespace}`); writeObjectGroupCache(transportMode, id, firstNamespace, response.objects.filter((item) => item.namespace === firstNamespace)); }
+        if (firstNamespace) { loadedObjectGroups.current.add(`${transportMode}:${id}:${firstNamespace}`); writeObjectGroupCache(transportMode, id, firstNamespace, visibleObjects.filter((item) => item.namespace === firstNamespace)); }
         const expanded = readExpandedObjectGroups(transportMode, id).filter((namespace) => namespaceList.includes(namespace));
         setCollapsedObjectGroups(new Set(namespaceList.filter((namespace) => !expanded.includes(namespace)).map((namespace) => `${id}:${namespace}`)));
         await Promise.all(expanded.filter((namespace) => namespace !== firstNamespace).map((namespace) => loadNamespaceObjects(namespace, true)));
+        if (objectName && !visibleObjects.some((item) => objectKey(item) === objectName)) { setObjectName(""); objectSelection.current[transportMode] = ""; localStorage.removeItem(`orbit.object.${transportMode}`); setResult(undefined); }
       } else {
         setCollapsedObjectGroups(new Set());
-        if (objectName && !response.objects.some((item) => objectKey(item) === objectName)) setObjectName(response.objects[0] ? objectKey(response.objects[0]) : "");
+        if (objectName && !visibleObjects.some((item) => objectKey(item) === objectName)) setObjectName(visibleObjects[0] ? objectKey(visibleObjects[0]) : "");
       }
       setCountRefresh((current) => current + 1); await reloadConnections();
     } catch (reason) {
