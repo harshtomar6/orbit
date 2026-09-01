@@ -5,12 +5,6 @@ export function getRuntime(): OrbitRuntime {
   return "__TAURI_INTERNALS__" in window ? "desktop" : "web";
 }
 
-export interface DatabaseTransport {
-  mode: DatabaseTransportMode;
-}
-
-export function defaultTransport(): DatabaseTransport {
-  return {
-    mode: getRuntime() === "desktop" ? "local" : "gateway",
-  };
+export function transportForSection(runtime: OrbitRuntime, section: "explore" | "ask" | "views"): DatabaseTransportMode {
+  return runtime === "desktop" && section === "explore" ? "local" : "gateway";
 }
