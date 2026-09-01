@@ -5,6 +5,7 @@
   --orbit-surface: #1b1b1a;
   --orbit-surface-raised: #222220;
   --orbit-hover: #292927;
+  --orbit-hover-strong: #343431;
   --orbit-border: #2d2d2a;
   --orbit-border-strong: #3b3b37;
   --orbit-text: #f4f3ef;
@@ -12,6 +13,8 @@
   --orbit-text-muted: #8d8b84;
   --orbit-accent: #f3f2ed;
   --orbit-accent-text: #171716;
+  --orbit-brand: #8e86e8;
+  --orbit-focus: #8e86e8;
   --orbit-selection: #30302d;
   --orbit-success: #70b98f;
   --orbit-warning: #d0a35c;
@@ -26,6 +29,7 @@
   --orbit-surface: #fbfbf9;
   --orbit-surface-raised: #ffffff;
   --orbit-hover: #e9e9e4;
+  --orbit-hover-strong: #deded8;
   --orbit-border: #deded8;
   --orbit-border-strong: #cdcdc5;
   --orbit-text: #1d1d1b;
@@ -33,6 +37,8 @@
   --orbit-text-muted: #85827b;
   --orbit-accent: #222220;
   --orbit-accent-text: #ffffff;
+  --orbit-brand: #6f65cf;
+  --orbit-focus: #6f65cf;
   --orbit-selection: #e4e4df;
   --orbit-success: #287c51;
   --orbit-warning: #9a681d;
