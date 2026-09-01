@@ -1,5 +1,5 @@
 import type { DataColumn, ExploreFilter, ExploreSort } from "@orbit/contracts";
-import { type FormEvent, useId, useState } from "react";
+import { type FormEvent, useEffect, useId, useRef, useState } from "react";
 
 type Panel = "filter" | "sort";
 
@@ -37,6 +37,7 @@ export function ExploreQueryControls({ columns, filters, sort, mongo, onFiltersC
   onSortChange: (sort: ExploreSort[]) => void;
 }) {
   const [panel, setPanel] = useState<Panel>();
+  const controlsRef = useRef<HTMLDivElement>(null);
   const [filterColumn, setFilterColumn] = useState("");
   const [filterOperator, setFilterOperator] = useState<ExploreFilter["operator"]>("eq");
   const [filterValue, setFilterValue] = useState("");
@@ -46,6 +47,22 @@ export function ExploreQueryControls({ columns, filters, sort, mongo, onFiltersC
 
   const selectedFilterColumn = filterColumn || columns[0]?.name || "";
   const selectedSortColumn = sortColumn || columns[0]?.name || "";
+
+  useEffect(() => {
+    if (!panel) return;
+    const dismissOnOutsidePointer = (event: PointerEvent) => {
+      if (event.target instanceof Node && !controlsRef.current?.contains(event.target)) setPanel(undefined);
+    };
+    const dismissOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPanel(undefined);
+    };
+    document.addEventListener("pointerdown", dismissOnOutsidePointer);
+    document.addEventListener("keydown", dismissOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOnOutsidePointer);
+      document.removeEventListener("keydown", dismissOnEscape);
+    };
+  }, [panel]);
 
   function addFilter(event: FormEvent) {
     event.preventDefault();
@@ -61,7 +78,7 @@ export function ExploreQueryControls({ columns, filters, sort, mongo, onFiltersC
     onSortChange([...sort.filter((item) => item.column !== selectedSortColumn), { column: selectedSortColumn, direction: sortDirection }]);
   }
 
-  return <div className="explore-query-controls">
+  return <div className="explore-query-controls" ref={controlsRef}>
     <button className={filters.length ? "active" : ""} type="button" aria-expanded={panel === "filter"} onClick={() => setPanel(panel === "filter" ? undefined : "filter")}><span>⌁</span> Filter{filters.length ? <b>{filters.length}</b> : null}</button>
     <button className={sort.length ? "active" : ""} type="button" aria-expanded={panel === "sort"} onClick={() => setPanel(panel === "sort" ? undefined : "sort")}><span>⇅</span> Sort{sort.length ? <b>{sort.length}</b> : null}</button>
     <datalist id={listId}>{columns.map((column) => <option value={column.name} key={column.name} />)}</datalist>

@@ -65,7 +65,7 @@ export function App() {
   const [objectName, setObjectName] = useState(params.get("object") ?? "");
   const [result, setResult] = useState<ExploreResult>();
   const [loading, setLoading] = useState(true); const [error, setError] = useState<ApiRequestError>();
-  const [menu, setMenu] = useState(false); const [objectSearch, setObjectSearch] = useState(""); const [collapsedObjectGroups, setCollapsedObjectGroups] = useState<Set<string>>(new Set());
+  const [menu, setMenu] = useState(false); const connectionMenuRef = useRef<HTMLDivElement>(null); const [objectSearch, setObjectSearch] = useState(""); const [collapsedObjectGroups, setCollapsedObjectGroups] = useState<Set<string>>(new Set());
   const [refreshingSchema, setRefreshingSchema] = useState(false);
   const [loadingObjectGroups, setLoadingObjectGroups] = useState<Set<string>>(new Set()); const [objectGroupErrors, setObjectGroupErrors] = useState<Record<string, string>>({});
   const loadedObjectGroups = useRef<Set<string>>(new Set()); const activeConnectionId = useRef(connectionId); activeConnectionId.current = connectionId;
@@ -133,6 +133,28 @@ export function App() {
     window.addEventListener("pointerup", handleUp);
   }
   useEffect(() => { document.documentElement.dataset.theme = theme; document.documentElement.style.colorScheme = theme; localStorage.setItem("orbit.theme", theme); }, [theme]);
+  useEffect(() => {
+    const dismissDropdowns = (target?: EventTarget | null) => {
+      if (!(target instanceof Node) || !connectionMenuRef.current?.contains(target)) setMenu(false);
+      document.querySelectorAll<HTMLDetailsElement>("details.explore-tabs-overflow[open], details.toolbar-menu[open]").forEach((dropdown) => {
+        if (!(target instanceof Node) || !dropdown.contains(target)) dropdown.open = false;
+      });
+    };
+    const dismissOnOutsidePointer = (event: PointerEvent) => dismissDropdowns(event.target);
+    const dismissAfterSelection = (event: MouseEvent) => {
+      if (!(event.target instanceof Element)) return;
+      event.target.closest("details.explore-tabs-overflow button, details.toolbar-menu button")?.closest<HTMLDetailsElement>("details")?.removeAttribute("open");
+    };
+    const dismissOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") dismissDropdowns(); };
+    document.addEventListener("pointerdown", dismissOnOutsidePointer);
+    document.addEventListener("click", dismissAfterSelection);
+    document.addEventListener("keydown", dismissOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOnOutsidePointer);
+      document.removeEventListener("click", dismissAfterSelection);
+      document.removeEventListener("keydown", dismissOnEscape);
+    };
+  }, []);
   useEffect(() => {
     const handleShortcut = (event: globalThis.KeyboardEvent) => {
       const modifier = event.metaKey || event.ctrlKey;
@@ -554,7 +576,7 @@ export function App() {
       <nav className="topbar-nav" aria-label="Primary navigation">{(["explore", "ask", "views"] as Section[]).map((item) => <button className={section === item ? "active" : ""} title={`${item.charAt(0).toUpperCase() + item.slice(1)}${runtime === "desktop" ? item === "explore" ? " · Direct connection" : " · Gateway" : ""}`} key={item} onClick={() => setSection(item)}><AppIcon name={item} size={14} /><span>{item}</span></button>)}</nav>
       <button className="command-trigger" onClick={() => { setMenu(false); setCommandOpen(true); }} aria-haspopup="dialog"><span>⌕</span><span>Search or jump to…</span><kbd>⌘K</kbd></button>
       <div className="topbar-drag-region" data-tauri-drag-region onMouseDown={startWindowDrag} />
-      <div className="connection-wrap"><button className="connection-button" onClick={() => setMenu(!menu)} aria-expanded={menu}>{connection ? <><span className={`db-icon ${connection.kind}`}>{icon(connection.kind)}</span><span className="connection-copy"><strong>{connection.name}</strong><small>{connection.database} · {transportMode === "local" ? "Direct" : "Gateway"}</small></span><span className={`mode-dot ${transportMode}`} /><AppIcon name="chevron" size={13} /></> : <><AppIcon name="database" /><strong>No connection</strong><AppIcon name="chevron" size={13} /></>}</button>{menu && <div className="connection-menu"><label>{transportMode === "local" ? "Direct connections" : "Workspace connections"}</label>{connections.map((item) => <button className={item.id === connectionId ? "active" : ""} key={item.id} onClick={() => selectConnection(item.id)}><span className={`db-icon ${item.kind}`}>{icon(item.kind)}</span><span><strong>{item.name}</strong><small>{item.environment} · {item.database} · {item.latencyMs ?? "—"} ms</small></span>{item.id === connectionId && <b>✓</b>}</button>)}<button className="manage" onClick={() => { setMenu(false); setManaging(true); }}><AppIcon name="plus" /> Add or manage connections</button><button className="appearance" onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}><AppIcon name={theme === "dark" ? "sun" : "moon"} /><span><strong>Appearance</strong><small>{theme === "dark" ? "Dark" : "Light"} mode</small></span></button></div>}</div>
+      <div className="connection-wrap" ref={connectionMenuRef}><button className="connection-button" onClick={() => setMenu(!menu)} aria-expanded={menu}>{connection ? <><span className={`db-icon ${connection.kind}`}>{icon(connection.kind)}</span><span className="connection-copy"><strong>{connection.name}</strong><small>{connection.database} · {transportMode === "local" ? "Direct" : "Gateway"}</small></span><span className={`mode-dot ${transportMode}`} /><AppIcon name="chevron" size={13} /></> : <><AppIcon name="database" /><strong>No connection</strong><AppIcon name="chevron" size={13} /></>}</button>{menu && <div className="connection-menu"><label>{transportMode === "local" ? "Direct connections" : "Workspace connections"}</label>{connections.map((item) => <button className={item.id === connectionId ? "active" : ""} key={item.id} onClick={() => selectConnection(item.id)}><span className={`db-icon ${item.kind}`}>{icon(item.kind)}</span><span><strong>{item.name}</strong><small>{item.environment} · {item.database} · {item.latencyMs ?? "—"} ms</small></span>{item.id === connectionId && <b>✓</b>}</button>)}<button className="manage" onClick={() => { setMenu(false); setManaging(true); }}><AppIcon name="plus" /> Add or manage connections</button><button className="appearance" onClick={() => { setTheme((current) => current === "dark" ? "light" : "dark"); setMenu(false); }}><AppIcon name={theme === "dark" ? "sun" : "moon"} /><span><strong>Appearance</strong><small>{theme === "dark" ? "Dark" : "Light"} mode</small></span></button></div>}</div>
     </header>
     <main className="orbit-content">
       {section === "explore" && <section className="explore-screen"><div className={`explore-layout${resizingSidebar ? " resizing-sidebar" : ""}`} style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}>
