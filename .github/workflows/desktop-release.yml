@@ -77,6 +77,9 @@ jobs:
       - name: Test workspace
         run: pnpm test
 
+      - name: Build desktop frontend
+        run: pnpm --filter @orbit/client build
+
       - name: Test desktop commands
         run: cargo test --manifest-path apps/client/src-tauri/Cargo.toml --locked
 
