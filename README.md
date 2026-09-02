@@ -94,7 +94,17 @@ git tag v0.2.0
 git push origin v0.2.0
 ```
 
-The resulting installers are available from the repository's **Releases** page. The automated macOS builds use an ad-hoc signature, so macOS may still require approval under Privacy & Security. Windows builds are currently unsigned and may show a SmartScreen warning. Production distribution should configure Apple notarization and a Windows code-signing certificate in the workflow secrets.
+The resulting installers are available from the repository's **Releases** page. macOS releases require a `Developer ID Application` certificate and Apple notarization credentials. The workflow refuses to publish an ad-hoc signed macOS build.
+
+After exporting the certificate and private key from Keychain Access as a password-protected `.p12`, configure the repository secrets interactively:
+
+```sh
+./scripts/configure-apple-signing.sh /absolute/path/to/developer-id-application.p12
+```
+
+The script uploads `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` through the authenticated GitHub CLI without printing their values. `APPLE_PASSWORD` must be an app-specific password. During each macOS build, the workflow imports the certificate into an ephemeral keychain, signs with the discovered Developer ID identity, asks Apple to notarize the bundle, verifies Gatekeeper acceptance and the stapled ticket, then deletes the temporary keychain.
+
+Windows builds are currently unsigned and may show a SmartScreen warning. Production Windows distribution should configure a Windows code-signing certificate separately.
 
 ## Mobile
 
