@@ -101,19 +101,30 @@ pub async fn local_list_namespace_objects(id: String, namespace: String, state: 
 pub async fn local_explore(request: ExploreRequest, state: State<'_, LocalState>) -> Result<ExploreResult, String> { if request.limit == 0 || request.limit > 200 { return Err("Local Explore limit must be between 1 and 200.".into()); } let item = { let records = state.records.read().await; record(&records, &request.connection_id)?.clone() }; let pool = state.pool_for(&item).await?; let offset = decode_cursor(request.cursor.as_deref())?; let started = Instant::now(); let mut result = match pool { PoolHandle::Postgres(pool) => explore_pg(&pool, &request, offset).await?, PoolHandle::Mysql(pool) => explore_mysql(&pool, &request, offset).await?, PoolHandle::Mongodb(client) => explore_mongo(&client, &request.namespace, &request, offset).await? }; result.duration_ms = started.elapsed().as_millis() as u64; if serde_json::to_vec(&result.rows).map_err(|error| error.to_string())?.len() > MAX_RESPONSE_BYTES { return Err("Local query response exceeded 2 MB.".into()); } Ok(result) }
 
 fn mongo_filter(filters: Option<&[ExploreFilter]>) -> Result<Document, String> {
-    let mut result = Document::new();
+    let mut clauses = Vec::new();
     for item in filters.unwrap_or(&[]) {
-        let value = Bson::try_from(item.value.clone()).map_err(|error| format!("Invalid MongoDB filter value for {}: {error}", item.column))?;
         let expression = match item.operator {
-            FilterOperator::Eq => doc! { "$eq": value },
-            FilterOperator::Neq => doc! { "$ne": value },
-            FilterOperator::Gt => doc! { "$gt": value },
-            FilterOperator::Lt => doc! { "$lt": value },
-            FilterOperator::Contains => doc! { "$regex": item.value.as_str().unwrap_or(""), "$options": "i" },
+            FilterOperator::Contains => {
+                let value = item.value.as_str().ok_or_else(|| format!("MongoDB contains filter for {} requires a string value.", item.column))?;
+                let escaped = value.chars().fold(String::new(), |mut output, character| { if ".*+?^${}()|[]\\".contains(character) { output.push('\\'); } output.push(character); output });
+                doc! { "$regex": escaped, "$options": "i" }
+            },
+            _ => {
+                let value = Bson::try_from(item.value.clone()).map_err(|error| format!("Invalid MongoDB filter value for {}: {error}", item.column))?;
+                match item.operator {
+                    FilterOperator::Eq => doc! { "$eq": value },
+                    FilterOperator::Neq => doc! { "$ne": value },
+                    FilterOperator::Gt => doc! { "$gt": value },
+                    FilterOperator::Lt => doc! { "$lt": value },
+                    FilterOperator::Contains => unreachable!(),
+                }
+            },
         };
-        result.insert(&item.column, expression);
+        let mut clause = Document::new();
+        clause.insert(&item.column, expression);
+        clauses.push(Bson::Document(clause));
     }
-    Ok(result)
+    Ok(if clauses.is_empty() { Document::new() } else { doc! { "$and": clauses } })
 }
 
 #[tauri::command]
@@ -264,4 +275,75 @@ async fn explore_mongo(client: &mongodb::Client, database: &str, request: &Explo
 }
 
 #[cfg(test)]
-mod tests { use super::*; #[test] fn identifies_mongo_system_objects() { assert!(is_mongo_system_namespace("admin")); assert!(is_mongo_system_namespace("CONFIG")); assert!(!is_mongo_system_namespace("app")); assert!(is_mongo_system_collection("system.keys")); assert!(!is_mongo_system_collection("users")); } #[test] fn cursor_round_trip() { let cursor = encode_cursor(42).unwrap(); assert_eq!(decode_cursor(Some(&cursor)).unwrap(), 42); } #[test] fn quotes_identifiers() { assert_eq!(quote("weird\"name", '"'), "\"weird\"\"name\""); assert_eq!(quote("weird`name", '`'), "`weird``name`"); } #[test] fn converts_scalar_postgres_foreign_keys_to_text() { assert_eq!(pg_reference_text(&serde_json::json!(42)).unwrap(), "42"); assert_eq!(pg_reference_text(&serde_json::json!("74ef")).unwrap(), "74ef"); assert!(pg_reference_text(&Value::Null).is_err()); } #[test] fn parses_mongo_extended_json_filter_values() { let value = Bson::try_from(serde_json::json!({ "$oid": "507f1f77bcf86cd799439011" })).unwrap(); assert!(matches!(value, Bson::ObjectId(_))); let value = Bson::try_from(serde_json::json!({ "$date": "2026-08-23T00:00:00Z" })).unwrap(); assert!(matches!(value, Bson::DateTime(_))); let filter = mongo_filter(Some(&[ExploreFilter { column: "ownerId".into(), operator: FilterOperator::Eq, value: serde_json::json!({ "$oid": "507f1f77bcf86cd799439011" }) }])).unwrap(); assert!(matches!(filter.get_document("ownerId").unwrap().get("$eq"), Some(Bson::ObjectId(_)))); } #[test] fn infers_conventional_reference_collections() { let collections = vec!["users".into(), "companies".into(), "audit_logs".into()]; assert_eq!(inferred_collection_names("userId", &collections), vec!["users"]); assert_eq!(inferred_collection_names("company_id", &collections), vec!["companies"]); assert!(inferred_collection_names("status", &collections).is_empty()); } }
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identifies_mongo_system_objects() {
+        assert!(is_mongo_system_namespace("admin"));
+        assert!(is_mongo_system_namespace("CONFIG"));
+        assert!(!is_mongo_system_namespace("app"));
+        assert!(is_mongo_system_collection("system.keys"));
+        assert!(!is_mongo_system_collection("users"));
+    }
+
+    #[test]
+    fn cursor_round_trip() {
+        let cursor = encode_cursor(42).unwrap();
+        assert_eq!(decode_cursor(Some(&cursor)).unwrap(), 42);
+    }
+
+    #[test]
+    fn quotes_identifiers() {
+        assert_eq!(quote("weird\"name", '"'), "\"weird\"\"name\"");
+        assert_eq!(quote("weird`name", '`'), "`weird``name`");
+    }
+
+    #[test]
+    fn converts_scalar_postgres_foreign_keys_to_text() {
+        assert_eq!(pg_reference_text(&serde_json::json!(42)).unwrap(), "42");
+        assert_eq!(pg_reference_text(&serde_json::json!("74ef")).unwrap(), "74ef");
+        assert!(pg_reference_text(&Value::Null).is_err());
+    }
+
+    #[test]
+    fn parses_mongo_extended_json_filter_values() {
+        let value = Bson::try_from(serde_json::json!({ "$oid": "507f1f77bcf86cd799439011" })).unwrap();
+        assert!(matches!(value, Bson::ObjectId(_)));
+        let value = Bson::try_from(serde_json::json!({ "$date": "2026-08-23T00:00:00Z" })).unwrap();
+        assert!(matches!(value, Bson::DateTime(_)));
+        let filter = mongo_filter(Some(&[ExploreFilter { column: "ownerId".into(), operator: FilterOperator::Eq, value: serde_json::json!({ "$oid": "507f1f77bcf86cd799439011" }) }])).unwrap();
+        let clauses = filter.get_array("$and").unwrap();
+        let owner = clauses[0].as_document().unwrap().get_document("ownerId").unwrap();
+        assert!(matches!(owner.get("$eq"), Some(Bson::ObjectId(_))));
+    }
+
+    #[test]
+    fn combines_repeated_mongo_filters_with_and() {
+        let filters = [
+            ExploreFilter { column: "age".into(), operator: FilterOperator::Gt, value: serde_json::json!(18) },
+            ExploreFilter { column: "age".into(), operator: FilterOperator::Lt, value: serde_json::json!(65) },
+        ];
+        let filter = mongo_filter(Some(&filters)).unwrap();
+        let clauses = filter.get_array("$and").unwrap();
+        assert_eq!(clauses.len(), 2);
+        assert_eq!(clauses[0].as_document().unwrap().get_document("age").unwrap().get_i32("$gt").unwrap(), 18);
+        assert_eq!(clauses[1].as_document().unwrap().get_document("age").unwrap().get_i32("$lt").unwrap(), 65);
+    }
+
+    #[test]
+    fn escapes_literal_mongo_contains_filters() {
+        let filter = mongo_filter(Some(&[ExploreFilter { column: "name".into(), operator: FilterOperator::Contains, value: serde_json::json!("Ada.*[1]") }])).unwrap();
+        let clause = filter.get_array("$and").unwrap()[0].as_document().unwrap().get_document("name").unwrap();
+        assert_eq!(clause.get_str("$regex").unwrap(), "Ada\\.\\*\\[1\\]");
+        assert!(mongo_filter(Some(&[ExploreFilter { column: "name".into(), operator: FilterOperator::Contains, value: serde_json::json!(42) }])).is_err());
+    }
+
+    #[test]
+    fn infers_conventional_reference_collections() {
+        let collections = vec!["users".into(), "companies".into(), "audit_logs".into()];
+        assert_eq!(inferred_collection_names("userId", &collections), vec!["users"]);
+        assert_eq!(inferred_collection_names("company_id", &collections), vec!["companies"]);
+        assert!(inferred_collection_names("status", &collections).is_empty());
+    }
+}

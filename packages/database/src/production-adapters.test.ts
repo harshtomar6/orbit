@@ -1,6 +1,6 @@
 import { ObjectId } from "mongodb";
 import { describe, expect, it } from "vitest";
-import { inferredMongoCollections, isMongoSystemCollection, isMongoSystemNamespace, mongoExtendedJson, mongoNativeType, profileMongoDocuments } from "./production-adapters.js";
+import { inferredMongoCollections, isMongoSystemCollection, isMongoSystemNamespace, mongoExtendedJson, mongoFilter, mongoNativeType, profileMongoDocuments } from "./production-adapters.js";
 
 describe("gateway MongoDB value normalization", () => {
   it("identifies MongoDB system namespaces and collections", () => {
@@ -48,5 +48,24 @@ describe("gateway MongoDB value normalization", () => {
     expect(profile.columns.find((field) => field.name === "status")?.enumValues).toEqual(["active", "paused"]);
     expect(profile.columns.find((field) => field.name === "profile.email")?.enumValues).toBeUndefined();
     expect(profile.columns.find((field) => field.name === "profile.apiToken")?.enumValues).toBeUndefined();
+  });
+
+  it("combines repeated field filters with AND", () => {
+    expect(mongoFilter([
+      { column: "age", operator: "gt", value: 18 },
+      { column: "age", operator: "lt", value: 65 },
+    ])).toEqual({ $and: [{ age: { $gt: 18 } }, { age: { $lt: 65 } }] });
+  });
+
+  it("uses a literal case-insensitive pattern for contains", () => {
+    expect(mongoFilter([{ column: "name", operator: "contains", value: "Ada.*[1]" }]))
+      .toEqual({ $and: [{ name: { $regex: "Ada\\.\\*\\[1\\]", $options: "i" } }] });
+    expect(() => mongoFilter([{ column: "name", operator: "contains", value: 42 }])).toThrow("requires a string");
+  });
+
+  it("deserializes Extended JSON values inside arrays", () => {
+    const filter = mongoFilter([{ column: "owners", operator: "eq", value: [{ $oid: "507f1f77bcf86cd799439011" }] }]);
+    const values = (filter.$and?.[0]?.owners as { $eq: ObjectId[] }).$eq;
+    expect(values[0]).toBeInstanceOf(ObjectId);
   });
 });

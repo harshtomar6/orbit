@@ -98,7 +98,24 @@ export async function createMySqlAdapter(connection: DatabaseConnection, connect
   };
 }
 
-function mongoFilter(filters: ExploreFilter[] | undefined): Filter<Document> { const result: Filter<Document> = {}; for (const item of filters ?? []) { if (item.operator === "contains") { result[item.column] = { $regex: String(item.value), $options: "i" }; continue; } const operator = { eq: "$eq", neq: "$ne", gt: "$gt", lt: "$lt" }[item.operator]; const value = item.value !== null && typeof item.value === "object" && !Array.isArray(item.value) ? BSON.EJSON.deserialize({ value: item.value }).value : item.value; result[item.column] = { [operator]: value }; } return result; }
+const escapeMongoRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+export function mongoFilter(filters: ExploreFilter[] | undefined): Filter<Document> {
+  const clauses = (filters ?? []).map((item): Filter<Document> => {
+    if (item.operator === "contains") {
+      if (typeof item.value !== "string") throw new QueryRejectedError(`MongoDB contains filter for ${item.column} requires a string value.`);
+      return { [item.column]: { $regex: escapeMongoRegex(item.value), $options: "i" } };
+    }
+    const operator = { eq: "$eq", neq: "$ne", gt: "$gt", lt: "$lt" }[item.operator];
+    try {
+      const value = BSON.EJSON.deserialize({ value: item.value }).value;
+      return { [item.column]: { [operator]: value } };
+    } catch (error) {
+      throw new QueryRejectedError(`Invalid MongoDB filter value for ${item.column}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  });
+  return clauses.length ? { $and: clauses } : {};
+}
 
 export function mongoExtendedJson(document: Document): Record<string, unknown> {
   const serialized: unknown = BSON.EJSON.serialize(document, { relaxed: true });
