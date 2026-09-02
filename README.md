@@ -1,21 +1,130 @@
 # Orbit
 
-An AI-native database workspace for exploring raw data, asking questions, and saving reusable views.
+**An AI-native database client for exploring data, asking complex questions, and turning answers into reusable dashboards.**
 
-## Architecture
+Orbit brings direct database exploration, an AI data agent, and lightweight business intelligence into one cross-platform workspace. Connect MongoDB, PostgreSQL, or MySQL; navigate data manually with developer-friendly controls; ask questions in natural language; inspect and run the generated queries; visualize the results; and save useful charts as dashboards.
 
-- `apps/client` — React + Vite client used by the web app and Tauri desktop shell.
-- `apps/gateway` — HTTPS query gateway used by web and mobile clients.
+The desktop app is available for macOS, Windows, and Linux. A mobile experience is planned so you can securely interact with your data away from your desk.
+
+![Orbit Explore showing a keyboard-navigable PostgreSQL table](docs/images/orbit-explore.png)
+
+<p align="center"><sub>Explore tables and collections with keyboard navigation, typed values, filters, sorting, and linked records.</sub></p>
+
+## Why Orbit?
+
+Database tools usually force you to choose between two extremes:
+
+- A developer client gives you precise access, but expects you to manually inspect tables, documents, and query results.
+- A BI tool gives you dashboards, but adds another product, another data model, and another setup workflow.
+- A generic AI assistant can write a query, but often hides its reasoning, lacks database context, or runs outside the workflow where you inspect your data.
+
+Orbit treats these as different ways of exploring the same data—not separate products.
+
+You can start with a collection or table, move through it entirely from the keyboard, ask an agent to investigate a harder question, review the exact query it generated, and turn the result into a chart or saved dashboard. The goal is to shorten the path from **“I wonder why this happened”** to a trustworthy, reusable answer.
+
+## Who is Orbit for?
+
+Orbit is designed for people who work close to production data:
+
+- **Developers** debugging application state, inspecting relationships, and validating migrations or integrations.
+- **Founders and operators** answering product and business questions without waiting for a separate analytics workflow.
+- **Data and product teams** exploring unfamiliar datasets, testing hypotheses, and sharing lightweight views.
+- **Small teams** that want database exploration and operational dashboards without maintaining a full BI stack.
+
+Orbit is especially useful when the question starts simple but the investigation does not.
+
+## Explore data your way
+
+### 1. Manual and developer-friendly
+
+Browse databases, schemas, tables, and collections directly. Orbit is keyboard-first across its core workflows, with command-palette navigation, arrow-key table movement, cell selection and copying, pinned and hidden columns, filtering, sorting, pagination, exports, and inspectable nested values.
+
+Database-aware formatting makes raw data easier to understand: ObjectIds, dates, JSON, enums, statuses, foreign keys, and linked records are rendered as useful interactive values rather than undifferentiated strings.
+
+### 2. Ask an AI data agent
+
+Ask questions in natural language when manual exploration becomes slow or the query becomes complex. Orbit gives the agent database-specific schema context, including profiled nested MongoDB fields and low-cardinality enum-like values.
+
+The agentic flow stays inspectable:
+
+1. Orbit prepares relevant schema context.
+2. The agent generates a typed, read-only query plan.
+3. You see the exact SQL or MongoDB aggregation before it runs.
+4. You can review or edit the query and explicitly approve execution.
+5. Orbit returns the evidence, timing, result set, and an evidence-backed answer.
+
+The query is part of the product experience—not a hidden implementation detail behind a loading spinner.
+
+![Orbit Ask AI showing a generated PostgreSQL query ready for review](docs/images/orbit-ask-ai.png)
+
+<p align="center"><sub>Ask in natural language, follow the agent's activity, and inspect or edit the generated query before it runs.</sub></p>
+
+### 3. Visualize and save the answer
+
+Turn query results into tables, metrics, line charts, bar charts, or donut charts. Save useful results as Views and arrange them into dashboards that can be refreshed and revisited.
+
+For day-to-day operational questions, this closes the gap between a database client and a BI app: investigate the data, create the visualization, and keep the result in the same workspace.
+
+![Orbit query results visualized as bar, line, and donut charts](docs/images/orbit-visualizations.png)
+
+<p align="center"><sub>Visualize query results and save useful answers as refreshable Views and dashboards.</sub></p>
+
+## Product principles
+
+- **AI-native, not AI-bolted-on.** The agent understands database structure, produces inspectable queries, and works inside the exploration loop.
+- **Keyboard-first.** Common navigation, selection, search, and inspection flows should remain fast without reaching for the mouse.
+- **Local where it matters.** Desktop Explore connects through native Rust database drivers, and credentials remain in the operating system credential vault.
+- **Safe by default.** Queries are bounded and read-only, generated queries require review, and database accounts should use read-only grants.
+- **One workspace, multiple modes.** Manual exploration, AI investigation, charts, and saved dashboards build on the same connections and data model.
+- **Available beyond one platform.** Orbit ships for macOS, Windows, and Linux, with mobile access coming soon.
+
+## What is implemented
+
+- MongoDB, PostgreSQL, and MySQL connections.
+- Native desktop connectivity through SQLx and the official MongoDB Rust driver.
+- Web and remote access through an HTTPS gateway that never exposes database credentials to the browser.
+- Connection testing, health, latency, encrypted gateway credential storage, and operating-system credential-vault storage on desktop.
+- Lazy and cached database/schema/collection discovery with explicit refresh controls.
+- Multi-tab table and collection exploration without refetching when switching between cached tabs.
+- Typed filters, sorting, pagination, loaded-row search, column controls, CSV/JSON export, and document counts.
+- Keyboard table navigation, cell selection and copying, and a command palette.
+- Rich formatting for ObjectIds, dates, nested JSON, enums, statuses, foreign keys, and linked records.
+- Linked-record inspection for MongoDB references and PostgreSQL foreign keys.
+- AI query drafting with visible progress, inspect-before-run review, editable queries, assumptions, sources, evidence, and execution timing.
+- Result visualization with table, metric, line, bar, and donut presentations.
+- Persistent Views with dashboard layouts, refresh states, duplication, deletion, and revocable sharing.
+- Signed and notarized macOS releases plus Windows and Linux installers.
+
+Multi-user workspaces, session-based authentication, scheduled dashboard refresh, Windows code signing, and mobile workflows are still in development.
+
+## How Orbit connects
+
+Orbit uses different transports for local desktop exploration and remote features:
+
+```text
+Desktop Explore ── native Rust drivers ──> Database
+
+Desktop Ask/Views ─┐
+Web client ────────┼── HTTPS gateway ──> Database
+Future mobile ─────┘
+```
+
+On desktop, Explore connects directly using SQLx pools for PostgreSQL/MySQL and the official MongoDB Rust driver. Credentials are stored in Keychain on macOS, Credential Manager on Windows, or Secret Service on Linux; only non-secret connection metadata is written to Orbit's app-data directory.
+
+Ask, Views, sharing, the web app, and future mobile clients use the gateway. The browser never receives database credentials and never opens a native database socket.
+
+## Repository structure
+
+- `apps/client` — React + Vite client shared by the web app and Tauri desktop shell.
+- `apps/client/src-tauri` — Tauri 2 desktop wrapper and native Rust command boundary.
+- `apps/gateway` — HTTPS query gateway for AI, Views, sharing, web, and future mobile clients.
 - `packages/contracts` — shared request, response, and database metadata types.
-- `packages/database` — adapter interfaces for PostgreSQL, MySQL, and MongoDB.
+- `packages/database` — adapter interfaces and implementations for PostgreSQL, MySQL, and MongoDB.
 - `packages/theme` — shared design tokens.
-- `apps/client/src-tauri` — Tauri 2 desktop wrapper and native command boundary.
-
-The browser never receives database credentials and never opens a native database socket. It calls the gateway over HTTPS. Desktop defaults to a native Rust transport and can switch to the gateway from the top bar.
-
-In local mode, Tauri connects directly with SQLx pools for PostgreSQL/MySQL and the official MongoDB Rust driver. Credentials are stored in the operating-system credential vault (Keychain on macOS, Credential Manager on Windows, Secret Service on Linux); only non-secret connection metadata is written to Orbit's app-data directory. Explore is available locally. Ask, Views, and sharing remain gateway-backed and are disabled while local mode is selected.
 
 ## Getting started
+
+### Web client and gateway
 
 ```sh
 pnpm install
@@ -24,13 +133,26 @@ pnpm dev
 
 The client runs at `http://localhost:5173` and the gateway at `http://localhost:8787`.
 
-With no connection configuration, the gateway exposes one visibly labeled, in-memory demo connection. It contains no credentials and is intended only for local evaluation.
+With no connection configuration, the gateway exposes one visibly labelled in-memory demo connection. It contains no credentials and is intended only for local evaluation.
 
-## Configuring connections
+### Desktop app
 
-Open the connection switcher and choose **Add or manage connections**. New connections are tested before they are committed. Public metadata and encrypted credential records are stored separately under `ORBIT_DATA_DIR` (default: `.orbit-data` in the gateway working directory); credentials are never returned by the API.
+Install the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/), including Rust, then run:
 
-Development creates a local encryption key with owner-only file permissions. Production requires an explicit 32-byte base64 key:
+```sh
+pnpm install
+pnpm desktop:dev
+```
+
+Desktop Explore automatically uses the local native transport. Ask and Views use the gateway, so those features require the gateway to be running and configured.
+
+## Configuring database connections
+
+Open the connection switcher and choose **Add or manage connections**. New connections are tested before they are saved.
+
+For gateway connections, public metadata and encrypted credential records are stored separately under `ORBIT_DATA_DIR` (default: `.orbit-data` in the gateway working directory). Credentials are never returned by the API.
+
+Development creates a local encryption key with owner-only file permissions. Production requires an explicit 32-byte base64 key and API token:
 
 ```sh
 export ORBIT_ENCRYPTION_KEY="$(openssl rand -base64 32)"
@@ -39,73 +161,69 @@ export ORBIT_DATA_DIR='/var/lib/orbit'
 pnpm dev
 ```
 
-The file vault uses AES-256-GCM with a unique IV for every secret. Use a persistent volume and an externally managed encryption key in a single-node deployment; a distributed deployment should replace the vault implementation with KMS-backed secret storage. Create database users with read-only grants—Orbit's application checks are defense in depth, not a substitute for database permissions. `ORBIT_API_TOKEN` and `ORBIT_ENCRYPTION_KEY` are mandatory when `NODE_ENV=production`.
+The file vault uses AES-256-GCM with a unique IV for every secret. Use a persistent volume and an externally managed encryption key in a single-node deployment; distributed deployments should replace the file vault with KMS-backed secret storage.
 
-Gateway limits default to 10 seconds, 200 rows per request, and a 2 MB serialized response. Override time and response size with `QUERY_TIMEOUT_MS` and `MAX_RESPONSE_BYTES`.
+Always create database users with read-only grants. Orbit's application-level validation is defense in depth, not a substitute for database permissions.
 
-## Configuring Ask
+Gateway limits default to 10 seconds, 200 rows per request, and a 2 MB serialized response. Override the time and response-size limits with `QUERY_TIMEOUT_MS` and `MAX_RESPONSE_BYTES`.
 
-Ask uses OpenRouter's OpenAI-compatible Chat Completions API with strict Structured Outputs to generate a typed query plan. Configure the key only on the gateway:
+## Configuring the AI agent
+
+Ask uses OpenRouter's OpenAI-compatible API with Structured Outputs. Configure the key only on the gateway:
 
 ```sh
 export OPENROUTER_API_KEY='sk-or-v1-...'
-export OPENROUTER_MODEL='openai/gpt-5.4' # optional; this is the current default
-export OPENROUTER_SITE_URL='https://orbit.example.com' # optional attribution header
+export OPENROUTER_MODEL='openai/gpt-5.4' # optional; current default
+export OPENROUTER_SITE_URL='https://orbit.example.com' # optional attribution
 pnpm dev
 ```
 
-For local development, these values can instead be placed in `apps/gateway/.env`; the gateway loads that file automatically on startup. Restart the gateway after changing it.
+For local development, these values can instead be placed in `apps/gateway/.env`. Restart the gateway after changing them.
 
-The browser never receives the API key. Orbit sends the selected database's object and column metadata plus the user's question to OpenRouter; it does not send database credentials. For MongoDB, the gateway builds a bounded schema profile from up to `MONGO_SCHEMA_SAMPLE_SIZE` sampled documents, including nested dotted paths, observed types, field presence, and safe low-cardinality enum candidates. It stores only this derived profile (never raw documents) in `ORBIT_DATA_DIR/schema-profiles.json`, reuses it for `MONGO_SCHEMA_PROFILE_TTL_MS`, and invalidates it when the connection or schema is refreshed. `ASK_SCHEMA_FIELD_LIMIT` bounds how many fields enter one model request. After an approved query runs, up to 50 bounded evidence rows are sent for the narrative summary. Generated queries are returned as unexecuted drafts. Users can inspect or edit them, and execution always requires a separate action that repeats server-side read-only validation. See the [OpenRouter OpenAI SDK documentation](https://openrouter.ai/docs/guides/community/openai-sdk).
+The browser never receives the API key. Orbit sends the selected database's object and column metadata plus the user's question to OpenRouter; it does not send database credentials.
 
-For another OpenAI-compatible provider, set `ORBIT_LLM_API_KEY`, `ORBIT_LLM_BASE_URL`, and `ORBIT_LLM_MODEL`; these override the OpenRouter defaults.
+For MongoDB, the gateway builds and caches a bounded schema profile from sampled documents. The profile includes nested dotted paths, observed types, field presence, and safe low-cardinality enum candidates—but never stores the sampled raw documents. `MONGO_SCHEMA_SAMPLE_SIZE`, `MONGO_SCHEMA_PROFILE_TTL_MS`, and `ASK_SCHEMA_FIELD_LIMIT` control profiling and context size.
 
-## Implemented vertical slice
+After you approve and run a generated query, Orbit sends up to 50 bounded evidence rows for the narrative answer. Execution repeats server-side read-only validation even if the generated query was edited.
 
-- Connection discovery and switching with environment, access, health, latency, and database metadata.
-- Add, edit, test, refresh, and remove workflows with encrypted server-side credential storage and rollback on failed connection tests.
-- PostgreSQL, MySQL, and MongoDB pooled adapters with native schema/object introspection.
-- Parameterized filters, allowlisted sort identifiers, opaque server cursors, cancellation, timeouts, row limits, and response-size checks.
-- Raw browsing with explicit loading/empty/error/timeout/permission states, column visibility, loaded-page search, CSV/JSON export, URL state, keyboard row selection, and JSON/document inspection.
-- Structured request IDs and metadata-only audit events.
-- Ask query drafting through strict provider output, mandatory inspect-before-run UX, editable/rerunnable queries, assumptions, sources, evidence rows, execution timing, and responsive table/bar/line/donut results with validated axes, tooltips, legends, and safe table fallback.
-- Persistent Views saved from Explore or Ask with grid layout, real data-driven table/metric/line/bar/donut components, manual refresh, stale/refreshing/failed/unavailable states, rename, duplicate, delete, and revocable sharing.
+To use another OpenAI-compatible provider, set `ORBIT_LLM_API_KEY`, `ORBIT_LLM_BASE_URL`, and `ORBIT_LLM_MODEL`.
 
-Multi-user workspace persistence, session-based authentication, scheduled refresh, and mobile workflows are deliberately shown as incomplete rather than backed by fake production APIs.
+## Security model
 
-Shared-view links use 256-bit random tokens. Orbit persists only a SHA-256 token hash and returns a sanitized public view plus freshly executed result rows; connection references, queries, filters, assumptions, and layouts are not included in public responses. Revoking a link immediately invalidates it.
-
-To run the desktop shell, install the Tauri prerequisites (including Rust) and run:
-
-```sh
-pnpm desktop:dev
-```
-
-Use the `desktop · local ↔` control in the top bar to switch between local and gateway connections. Local queries are generated by the native command boundary with parameterized values, allowlisted identifiers, a 10-second timeout, a 200-row maximum, and a 2 MB response cap. Orbit also configures every SQL pool session as read-only; still use a database account with read-only grants as the primary security boundary.
+- Desktop database secrets live in the operating system credential vault.
+- Gateway database secrets are encrypted at rest and never returned to clients.
+- Database connections should use read-only users with the smallest practical scope.
+- Query values are parameterized and identifiers are allowlisted.
+- Query time, row count, and response size are bounded.
+- AI-generated queries are drafts until explicitly approved.
+- Shared-view links use 256-bit random tokens; Orbit stores only their SHA-256 hashes.
+- Public shared results exclude connection references, credentials, queries, filters, assumptions, and dashboard layouts.
 
 ## Desktop releases
 
-Pushing a semantic-version tag starts the `Desktop release` GitHub Actions workflow. It verifies that the root, client, Tauri, and Cargo versions match the tag, runs the TypeScript and Rust checks, and builds installers for macOS Apple Silicon, macOS Intel, Windows x64, and Linux x64. Each build is retained as a workflow artifact and uploaded to a draft GitHub Release. The release is published only after every platform succeeds.
-
-For example, after changing every version to `0.2.0`:
+Pushing a semantic-version tag starts the `Desktop release` GitHub Actions workflow. It validates matching package versions, runs TypeScript and Rust checks, and builds installers for macOS Apple Silicon, macOS Intel, Windows x64, and Linux x64.
 
 ```sh
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
-The resulting installers are available from the repository's **Releases** page. macOS releases require a `Developer ID Application` certificate and Apple notarization credentials. The workflow refuses to publish an ad-hoc signed macOS build.
+Installers are published on the repository's [Releases](https://github.com/harshtomar6/orbit/releases) page after every platform succeeds.
 
-After exporting the certificate and private key from Keychain Access as a password-protected `.p12`, configure the repository secrets interactively:
+macOS builds use a Developer ID Application certificate, Apple notarization, Gatekeeper verification, and a stapled notarization ticket. Configure the required repository secrets with:
 
 ```sh
 ./scripts/configure-apple-signing.sh /absolute/path/to/developer-id-application.p12
 ```
 
-The script uploads `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, and `APPLE_TEAM_ID` through the authenticated GitHub CLI without printing their values. `APPLE_PASSWORD` must be an app-specific password. During each macOS build, the workflow imports the certificate into an ephemeral keychain, signs with the discovered Developer ID identity, asks Apple to notarize the bundle, verifies Gatekeeper acceptance and the stapled ticket, then deletes the temporary keychain.
+Windows builds are currently unsigned and may show a SmartScreen warning. Windows code signing is planned.
 
-Windows builds are currently unsigned and may show a SmartScreen warning. Production Windows distribution should configure a Windows code-signing certificate separately.
+## Roadmap
 
-## Mobile
+- Mobile apps for securely asking questions and viewing operational data on the go.
+- Scheduled refresh for saved dashboards.
+- Multi-user workspaces and session-based authentication.
+- Additional database engines and richer relationship discovery.
+- Windows code signing and smoother automatic updates.
 
-Add `apps/mobile` with Expo when the mobile workflows are defined. Share `@orbit/contracts`, the API client, authentication, and theme tokens. Build mobile-specific screens rather than shrinking the desktop grid.
+Orbit's long-term direction is simple: wherever you are, you should be able to move naturally between inspecting data yourself, delegating an investigation to an AI agent, and keeping the answer as a live visual view.
