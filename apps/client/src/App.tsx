@@ -74,6 +74,8 @@ export function App() {
   const [filters, setFilters] = useState<ExploreFilter[]>([]); const [sort, setSort] = useState<ExploreSort[]>([]); const [cursors, setCursors] = useState<string[]>([]);
   const [documentCount, setDocumentCount] = useState<DocumentCountState>(); const [countRefresh, setCountRefresh] = useState(0);
   const documentCountCache = useRef<Map<string, DocumentCountCacheEntry>>(new Map()); const documentCountRequests = useRef<Map<string, Promise<DocumentCountResult>>>(new Map());
+  const collectionCountHydrations = useRef<Set<string>>(new Set()); const collectionCountGeneration = useRef(0);
+  const activeTransportMode = useRef(transportMode); activeTransportMode.current = transportMode;
   const [selectedRow, setSelectedRow] = useState<Record<string, unknown>>(); const [referenceTrail, setReferenceTrail] = useState<LinkedDocument[]>([]); const [referenceLookup, setReferenceLookup] = useState<ReferenceLookupState>(); const [hidden, setHidden] = useState<Set<string>>(new Set()); const [pinned, setPinned] = useState<Set<string>>(new Set()); const [pinOffsets, setPinOffsets] = useState<Record<string, number>>({});
   const headerCells = useRef<Map<string, HTMLTableCellElement>>(new Map());
   const [gridAnchor, setGridAnchor] = useState<GridCell>({ row: 0, column: 0 }); const [gridActive, setGridActive] = useState<GridCell>({ row: 0, column: 0 }); const [gridCopyNotice, setGridCopyNotice] = useState("");
@@ -212,6 +214,52 @@ export function App() {
   const updateUrl = useCallback((connectionValue: string, objectValue: string, search = rowSearch) => { const next = new URLSearchParams(); if (connectionValue) next.set("connection", connectionValue); if (objectValue) next.set("object", objectValue); if (search) next.set("search", search); history.replaceState(null, "", `${location.pathname}?${next}`); }, [rowSearch]);
   const reloadConnections = useCallback(async () => { const items = await dbApi.connections(); setConnections(items); return items; }, [dbApi]);
 
+  function hydrateMongoCollectionCounts(id: string, namespace: string, candidates: DataObject[]) {
+    const missing = candidates.filter((item) => item.kind === "collection" && item.estimatedRows == null);
+    const hydrationKey = `${transportMode}:${id}:${namespace}`;
+    if (!missing.length || collectionCountHydrations.current.has(hydrationKey)) return;
+    collectionCountHydrations.current.add(hydrationKey);
+    const mode = transportMode;
+    const generation = collectionCountGeneration.current;
+    void (async () => {
+      for (let offset = 0; offset < missing.length; offset += 4) {
+        const chunk = missing.slice(offset, offset + 4);
+        const settled = await Promise.all(chunk.map(async (item) => {
+          const request: DocumentCountRequest = { connectionId: id, namespace, object: item.name };
+          const key = `${mode}:${documentCountCacheKey(request)}`;
+          const cached = freshDocumentCount(documentCountCache.current, key);
+          if (cached) return { name: item.name, result: cached };
+          let pending = documentCountRequests.current.get(key);
+          if (!pending) {
+            pending = dbApi.countDocuments(request).then((count) => { documentCountCache.current.set(key, { result: count, cachedAt: Date.now() }); return count; });
+            documentCountRequests.current.set(key, pending);
+            void pending.then(() => documentCountRequests.current.delete(key), () => documentCountRequests.current.delete(key));
+          }
+          return pending.then((result) => ({ name: item.name, result }), () => undefined);
+        }));
+        if (generation !== collectionCountGeneration.current || activeConnectionId.current !== id || activeTransportMode.current !== mode) return;
+        const counts = new Map(settled.filter((item) => item !== undefined).map((item) => [item.name, item.result.count]));
+        if (!counts.size) continue;
+        setObjects((current) => {
+          let changed = false;
+          const next = current.map((item) => {
+            const count = item.namespace === namespace ? counts.get(item.name) : undefined;
+            if (count === undefined || item.estimatedRows === count) return item;
+            changed = true;
+            return { ...item, estimatedRows: count };
+          });
+          if (changed) {
+            const group = next.filter((item) => item.namespace === namespace);
+            writeObjectGroupCache(mode, id, namespace, group);
+            const schema = readObjectSchemaCache(mode, id);
+            if (schema?.objects.some((item) => item.namespace === namespace)) writeObjectSchemaCache(mode, id, { ...schema, objects: mergeNamespaceObjects(schema.objects, namespace, group) });
+          }
+          return changed ? next : current;
+        });
+      }
+    })().finally(() => { if (generation === collectionCountGeneration.current) collectionCountHydrations.current.delete(hydrationKey); });
+  }
+
   useEffect(() => {
     let active = true;
     if (transportMode === exploreTransport) setExploreTabsHydrated(false);
@@ -243,6 +291,7 @@ export function App() {
   useEffect(() => {
     if (!connectionId) return;
     let active = true;
+    collectionCountGeneration.current += 1; collectionCountHydrations.current.clear();
     setLoading(true); setError(undefined); setObjects([]); setNamespaces([]); setResult(undefined); setObjectGroupErrors({}); setLoadingObjectGroups(new Set()); loadedObjectGroups.current.clear();
     const applyResponse = (response: ObjectListResult, fromCache: boolean) => {
       if (!active) return;
@@ -263,17 +312,19 @@ export function App() {
           if (namespace === firstNamespace) continue;
           const cacheKey = `${transportMode}:${connectionId}:${namespace}`;
           const cached = readObjectGroupCache(transportMode, connectionId, namespace);
-          if (cached) { combined = mergeNamespaceObjects(combined, namespace, visibleMongoObjects(cached)); loadedObjectGroups.current.add(cacheKey); continue; }
+          if (cached) { const visibleObjects = visibleMongoObjects(cached); combined = mergeNamespaceObjects(combined, namespace, visibleObjects); loadedObjectGroups.current.add(cacheKey); hydrateMongoCollectionCounts(connectionId, namespace, visibleObjects); continue; }
           setLoadingObjectGroups((current) => new Set(current).add(cacheKey));
           void dbApi.objectsInNamespace(connectionId, namespace).then((result) => {
             if (!active || activeConnectionId.current !== connectionId) return;
             const visibleObjects = visibleMongoObjects(result.objects);
             loadedObjectGroups.current.add(cacheKey); writeObjectGroupCache(transportMode, connectionId, namespace, visibleObjects);
             setObjects((current) => mergeNamespaceObjects(current, namespace, visibleObjects));
+            hydrateMongoCollectionCounts(connectionId, namespace, visibleObjects);
           }).catch((reason: unknown) => { if (active) setObjectGroupErrors((current) => ({ ...current, [cacheKey]: reason instanceof Error ? reason.message : String(reason) })); }).finally(() => { if (active) setLoadingObjectGroups((current) => { const next = new Set(current); next.delete(cacheKey); return next; }); });
         }
       } else setCollapsedObjectGroups(new Set());
       setNamespaces(namespaceList); setObjects(combined);
+      if (mongoGroups && firstNamespace) hydrateMongoCollectionCounts(connectionId, firstNamespace, combined.filter((item) => item.namespace === firstNamespace));
       const pendingObjectKey = transportMode === exploreTransport && pendingExploreObject.current ? objectKey(pendingExploreObject.current) : "";
       const preferredObject = pendingObjectKey || objectSelection.current[transportMode] || "";
       const current = combined.find((item) => objectKey(item) === preferredObject || item.name === preferredObject);
@@ -360,14 +411,14 @@ export function App() {
     if (!force && loadedObjectGroups.current.has(cacheKey)) return;
     if (!force) {
       const cached = readObjectGroupCache(transportMode, id, namespace);
-      if (cached) { loadedObjectGroups.current.add(cacheKey); setObjects((current) => mergeNamespaceObjects(current, namespace, visibleMongoObjects(cached))); return; }
+      if (cached) { const visibleObjects = visibleMongoObjects(cached); loadedObjectGroups.current.add(cacheKey); setObjects((current) => mergeNamespaceObjects(current, namespace, visibleObjects)); hydrateMongoCollectionCounts(id, namespace, visibleObjects); return; }
     }
     setLoadingObjectGroups((current) => new Set(current).add(cacheKey)); setObjectGroupErrors((current) => { const next = { ...current }; delete next[cacheKey]; return next; });
     try {
       const response = await dbApi.objectsInNamespace(id, namespace);
       if (activeConnectionId.current !== id) return;
       const visibleObjects = visibleMongoObjects(response.objects);
-      loadedObjectGroups.current.add(cacheKey); writeObjectGroupCache(transportMode, id, namespace, visibleObjects); setObjects((current) => mergeNamespaceObjects(current, namespace, visibleObjects));
+      loadedObjectGroups.current.add(cacheKey); writeObjectGroupCache(transportMode, id, namespace, visibleObjects); setObjects((current) => mergeNamespaceObjects(current, namespace, visibleObjects)); hydrateMongoCollectionCounts(id, namespace, visibleObjects);
     } catch (reason) {
       if (activeConnectionId.current === id) setObjectGroupErrors((current) => ({ ...current, [cacheKey]: reason instanceof Error ? reason.message : String(reason) }));
     } finally {
@@ -380,7 +431,7 @@ export function App() {
     const id = connectionId;
     setRefreshingSchema(true); setError(undefined);
     try {
-      const response = await dbApi.refreshSchema(id); documentCountCache.current.clear();
+      const response = await dbApi.refreshSchema(id); documentCountCache.current.clear(); collectionCountGeneration.current += 1; collectionCountHydrations.current.clear();
       const mongoGroups = response.namespaces !== undefined;
       const namespaceList = mongoGroups ? visibleMongoNamespaces(response.namespaces ?? []) : [...new Set(response.objects.map((item) => item.namespace))];
       const visibleObjects = mongoGroups ? visibleMongoObjects(response.objects) : response.objects;
@@ -391,7 +442,7 @@ export function App() {
       loadedObjectGroups.current.clear(); setNamespaces(namespaceList); setObjects(visibleObjects); setObjectGroupErrors({});
       if (mongoGroups) {
         const firstNamespace = namespaceList[0];
-        if (firstNamespace) { loadedObjectGroups.current.add(`${transportMode}:${id}:${firstNamespace}`); writeObjectGroupCache(transportMode, id, firstNamespace, visibleObjects.filter((item) => item.namespace === firstNamespace)); }
+        if (firstNamespace) { const firstObjects = visibleObjects.filter((item) => item.namespace === firstNamespace); loadedObjectGroups.current.add(`${transportMode}:${id}:${firstNamespace}`); writeObjectGroupCache(transportMode, id, firstNamespace, firstObjects); hydrateMongoCollectionCounts(id, firstNamespace, firstObjects); }
         const expanded = readExpandedObjectGroups(transportMode, id).filter((namespace) => namespaceList.includes(namespace));
         setCollapsedObjectGroups(new Set(namespaceList.filter((namespace) => !expanded.includes(namespace)).map((namespace) => `${id}:${namespace}`)));
         await Promise.all(expanded.filter((namespace) => namespace !== firstNamespace).map((namespace) => loadNamespaceObjects(namespace, true)));
@@ -587,7 +638,7 @@ export function App() {
     </header>
     <main className="orbit-content">
       {section === "explore" && <section className="explore-screen"><div className={`explore-layout${resizingSidebar ? " resizing-sidebar" : ""}`} style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}>
-        <aside className="object-list"><div className="object-list-toolbar"><input placeholder={`Search ${connection ? objectLabel(connection) : "objects"}`} value={objectSearch} onChange={(event) => setObjectSearch(event.target.value)} aria-label="Search objects" /><button className={refreshingSchema ? "refreshing" : ""} disabled={!connectionId || refreshingSchema} onClick={() => void refreshObjectSchema()} title="Refresh databases and expanded collections" aria-label="Refresh databases and expanded collections"><AppIcon name="refresh" size={14} /></button></div>{objectGroups.map(([namespace, items]) => { const stateKey = `${transportMode}:${connectionId}:${namespace}`; const collapsed = collapsedObjectGroups.has(`${connectionId}:${namespace}`); const groupLoading = loadingObjectGroups.has(stateKey); const groupError = objectGroupErrors[stateKey]; const loaded = loadedObjectGroups.current.has(stateKey) || connection?.kind !== "mongodb"; return <section className={`object-group${collapsed ? " collapsed" : ""}`} key={namespace}><button className="object-group-header" type="button" aria-expanded={!collapsed} onClick={() => toggleObjectGroup(namespace)} title={namespace}><span className="object-group-chevron">⌄</span><span className="object-group-database-icon"><AppIcon name="database" size={13} /></span><strong>{namespace}</strong><b>{groupLoading ? "…" : loaded ? items.length : "—"}</b></button>{!collapsed && <div className="object-group-items">{groupLoading ? <p className="object-group-state"><span className="spinner" /> Loading collections…</p> : groupError ? <button className="object-group-retry" onClick={() => void loadNamespaceObjects(namespace, true)}>Couldn’t load collections · Retry</button> : items.length ? items.map((item) => <button className={objectKey(item) === objectName ? "active" : ""} key={objectKey(item)} onClick={() => selectObject(item)} onDoubleClick={() => selectObject(item, true)}><span className={`object-kind-icon ${item.kind}`} aria-hidden="true">{item.kind === "collection" ? "" : item.kind === "view" ? "◇" : "▦"}</span><span className="object-row-name">{item.name}</span><span className="object-row-count" title={item.estimatedRows == null ? "Estimate unavailable" : `${item.estimatedRows.toLocaleString()} estimated ${item.kind === "collection" ? "documents" : "rows"}`}>{item.estimatedRows == null ? "—" : formatCompactCount(item.estimatedRows)}</span></button>) : <p className="object-group-state">No collections</p>}</div>}</section>; })}{!loading && !objectGroups.length && <p className="empty-copy">No accessible objects.</p>}</aside>
+        <aside className="object-list"><div className="object-list-toolbar"><input placeholder={`Search ${connection ? objectLabel(connection) : "objects"}`} value={objectSearch} onChange={(event) => setObjectSearch(event.target.value)} aria-label="Search objects" /><button className={refreshingSchema ? "refreshing" : ""} disabled={!connectionId || refreshingSchema} onClick={() => void refreshObjectSchema()} title="Refresh databases and expanded collections" aria-label="Refresh databases and expanded collections"><AppIcon name="refresh" size={14} /></button></div>{objectGroups.map(([namespace, items]) => { const stateKey = `${transportMode}:${connectionId}:${namespace}`; const collapsed = collapsedObjectGroups.has(`${connectionId}:${namespace}`); const groupLoading = loadingObjectGroups.has(stateKey); const groupError = objectGroupErrors[stateKey]; const loaded = loadedObjectGroups.current.has(stateKey) || connection?.kind !== "mongodb"; return <section className={`object-group${collapsed ? " collapsed" : ""}`} key={namespace}><button className="object-group-header" type="button" aria-expanded={!collapsed} onClick={() => toggleObjectGroup(namespace)} title={namespace}><span className="object-group-chevron">⌄</span><span className="object-group-database-icon"><AppIcon name="database" size={13} /></span><strong>{namespace}</strong><b>{groupLoading ? "…" : loaded ? items.length : "—"}</b></button>{!collapsed && <div className="object-group-items">{groupLoading ? <p className="object-group-state"><span className="spinner" /> Loading collections…</p> : groupError ? <button className="object-group-retry" title={groupError} onClick={() => void loadNamespaceObjects(namespace, true)}>{/timed out/i.test(groupError) ? "Collection loading timed out · Retry" : "Couldn’t load collections · Retry"}</button> : items.length ? items.map((item) => <button className={objectKey(item) === objectName ? "active" : ""} key={objectKey(item)} onClick={() => selectObject(item)} onDoubleClick={() => selectObject(item, true)}><span className={`object-kind-icon ${item.kind}`} aria-hidden="true">{item.kind === "collection" ? "" : item.kind === "view" ? "◇" : "▦"}</span><span className="object-row-name">{item.name}</span><span className="object-row-count" title={item.estimatedRows == null ? "Estimate loading or unavailable" : `${item.estimatedRows.toLocaleString()} estimated ${item.kind === "collection" ? "documents" : "rows"}`}>{item.estimatedRows == null ? "—" : formatCompactCount(item.estimatedRows)}</span></button>) : <p className="object-group-state">No collections</p>}</div>}</section>; })}{!loading && !objectGroups.length && <p className="empty-copy">No accessible objects.</p>}</aside>
         <div className="sidebar-resize-handle" role="separator" aria-label="Resize database sidebar" aria-orientation="vertical" aria-valuemin={190} aria-valuemax={320} aria-valuenow={sidebarWidth} tabIndex={0} onPointerDown={startSidebarResize} onKeyDown={(event) => { const delta = event.key === "ArrowLeft" ? -8 : event.key === "ArrowRight" ? 8 : 0; if (!delta) return; event.preventDefault(); const width = clampSidebarWidth(sidebarWidth + delta); setSidebarWidth(width); localStorage.setItem("orbit.sidebarWidth", String(width)); }} onDoubleClick={() => { setSidebarWidth(224); localStorage.setItem("orbit.sidebarWidth", "224"); }} />
         <div className="data-grid-wrap">{exploreTabs.length > 0 && <div className="explore-tabs-bar"><div className="explore-tabs-list" role="tablist" aria-label="Open data objects">{exploreTabs.map((tab, index) => <div className={`explore-tab${tab.id === activeExploreTabId ? " active" : ""}${tab.preview ? " preview" : ""}`} role="tab" aria-selected={tab.id === activeExploreTabId} tabIndex={tab.id === activeExploreTabId ? 0 : -1} title={`${tab.connectionName} · ${tab.namespace}.${tab.object}${tab.preview ? " · Preview" : ""}`} key={tab.id} onClick={() => activateExploreTab(tab)} onDoubleClick={() => promoteExploreWorkspaceTab(tab.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activateExploreTab(tab); } }}><span className={`explore-tab-kind ${tab.databaseKind}`}>{icon(tab.databaseKind)}</span><span className="explore-tab-copy"><strong>{tab.object}</strong><small>{tab.connectionName} · {tab.namespace}</small></span>{tab.preview && <button className="explore-tab-pin" onClick={(event) => { event.stopPropagation(); promoteExploreWorkspaceTab(tab.id); }} title="Keep tab open" aria-label={`Keep ${tab.object} tab open`}>◇</button>}<button className="explore-tab-close" onClick={(event) => { event.stopPropagation(); closeExploreWorkspaceTab(tab.id); }} title={`Close ${tab.object} · ⌘W`} aria-label={`Close ${tab.object}`}>×</button>{index < 9 && <kbd>{index + 1}</kbd>}</div>)}</div>{exploreTabs.length > 6 && <details className="explore-tabs-overflow" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}><summary title="All open tabs">⌄ <span>{exploreTabs.length}</span></summary><div>{exploreTabs.map((tab) => <button className={tab.id === activeExploreTabId ? "active" : ""} key={tab.id} onClick={(event) => { activateExploreTab(tab); event.currentTarget.closest("details")?.removeAttribute("open"); }}><span>{tab.databaseKind === "mongodb" ? "●" : "▦"}</span><span><strong>{tab.object}</strong><small>{tab.connectionName} · {tab.namespace}</small></span>{tab.preview && <em>Preview</em>}</button>)}</div></details>}</div>}<div className="grid-title"><div className="dataset-breadcrumb"><span>{selectedObject?.namespace ?? connection?.name ?? "Orbit"}</span><b>/</b><strong>{selectedObject?.name ?? (connection ? "Select an object" : "Add a database connection")}</strong></div>{selectedObject && <span>{objectTotal == null ? "Count unavailable" : `${objectTotalApproximate ? "~" : ""}${objectTotal.toLocaleString()} ${objectNoun}`} · {result?.columns.length ?? "—"} {connection?.kind === "mongodb" ? "fields" : "columns"}</span>}<button className={`icon-button${refreshingSchema ? " refreshing" : ""}`} disabled={!connectionId || refreshingSchema} onClick={() => void refreshObjectSchema()} title="Refresh schema" aria-label="Refresh schema"><AppIcon name="refresh" size={14} /></button>{transportMode === "gateway" && selectedObject && <details className="toolbar-menu dataset-actions" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}><summary aria-label="Dataset actions" title="Dataset actions">•••</summary><div><button onClick={() => { setSaveName(selectedObject.name); setSaveDialog("explore"); }}>▥ Save as view</button><button onClick={() => setSection("ask")}>✦ Ask about this data</button></div></details>}</div>
           <div className="grid-tools">{connection && selectedObject && <ExploreQueryControls columns={result?.columns ?? []} filters={filters} sort={sort} databaseKind={connection.kind} namespace={selectedObject.namespace} object={selectedObject.name} offset={cursors.length * 50} onFiltersChange={setFilters} onSortChange={setSort} />}<button onClick={() => setHidden(new Set())}><AppIcon name="columns" /> {hidden.size ? `${hidden.size} hidden` : "Columns"}</button>{selectedGridRange.cellCount > 1 && <button disabled={!visibleRows.length || !visibleColumns.length} onClick={() => void copyGridSelection()} title="Copy selection · ⌘C"><AppIcon name="copy" /> {gridCopyNotice || `Copy ${selectedGridLabel}`}</button>}<span className="grid-tools-spacer" /><label className="loaded-row-search"><span>⌕</span><input aria-label="Search loaded rows" placeholder="Search loaded rows" value={rowSearch} onChange={(event) => { setRowSearch(event.target.value); updateUrl(connectionId, objectName, event.target.value); }} /></label><details className="toolbar-menu export-menu" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}><summary><AppIcon name="download" size={13} /> Export</summary><div><button onClick={() => exportRows("csv")}>Export CSV</button><button onClick={() => exportRows("json")}>Export JSON</button></div></details></div>

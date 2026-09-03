@@ -12,6 +12,7 @@ use tokio::time::timeout;
 use uuid::Uuid;
 
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const COUNT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 2_000_000;
 
@@ -53,18 +54,14 @@ fn is_mongo_system_namespace(namespace: &str) -> bool { matches!(namespace.to_as
 fn is_mongo_system_collection(collection: &str) -> bool { collection.to_ascii_lowercase().starts_with("system.") }
 
 async fn mongo_collection_objects(connection_id: &str, client: &mongodb::Client, database: &str) -> Result<Vec<DataObject>, String> {
-    let collections = client.database(database).list_collection_names().authorized_collections(true).await.map_err(|error| format!("Could not list collections in {database}: {error}"))?.into_iter().filter(|name| !is_mongo_system_collection(name));
-    let database_name = database.to_string();
-    let connection_id = connection_id.to_string();
-    let mut objects = stream::iter(collections).map(|name| {
-        let collection = client.database(&database_name).collection::<Document>(&name);
-        let database_name = database_name.clone();
-        let connection_id = connection_id.clone();
-        async move {
-            let estimated_rows = timeout(Duration::from_secs(2), collection.estimated_document_count()).await.ok().and_then(Result::ok);
-            DataObject { connection_id, namespace: database_name, name, kind: "collection".into(), estimated_rows }
-        }
-    }).buffer_unordered(8).collect::<Vec<_>>().await;
+    let collections = timeout(DISCOVERY_TIMEOUT, client.database(database).list_collection_names().authorized_collections(true))
+        .await
+        .map_err(|_| format!("Collection discovery timed out in {database}."))?
+        .map_err(|error| format!("Could not list collections in {database}: {error}"))?;
+    let mut objects = collections.into_iter()
+        .filter(|name| !is_mongo_system_collection(name))
+        .map(|name| DataObject { connection_id: connection_id.to_string(), namespace: database.to_string(), name, kind: "collection".into(), estimated_rows: None })
+        .collect::<Vec<_>>();
     objects.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(objects)
 }
@@ -73,15 +70,18 @@ pub async fn list_objects_for(record: &ConnectionRecord, pool: PoolHandle) -> Re
     match pool {
         PoolHandle::Postgres(pool) => { let rows = timeout(QUERY_TIMEOUT, sqlx::query("SELECT n.nspname namespace,c.relname name,CASE c.relkind WHEN 'v' THEN 'view' ELSE 'table' END kind,GREATEST(c.reltuples,0)::bigint estimated_rows FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.relkind IN ('r','p','v','m') AND n.nspname NOT IN ('pg_catalog','information_schema') ORDER BY n.nspname,c.relname").fetch_all(&pool)).await.map_err(|_| "Schema introspection timed out.".to_string())?.map_err(|error| error.to_string())?; Ok((rows.into_iter().map(|row| DataObject { connection_id: record.public.id.clone(), namespace: row.get("namespace"), name: row.get("name"), kind: row.get("kind"), estimated_rows: row.try_get::<i64, _>("estimated_rows").ok().map(|value| value.max(0) as u64) }).collect(), None)) },
         PoolHandle::Mysql(pool) => { let rows = timeout(QUERY_TIMEOUT, sqlx::query("SELECT TABLE_SCHEMA namespace,TABLE_NAME name,CASE TABLE_TYPE WHEN 'VIEW' THEN 'view' ELSE 'table' END kind,TABLE_ROWS estimated_rows FROM information_schema.TABLES WHERE TABLE_SCHEMA=? ORDER BY TABLE_NAME").bind(&record.public.database).fetch_all(&pool)).await.map_err(|_| "Schema introspection timed out.".to_string())?.map_err(|error| error.to_string())?; Ok((rows.into_iter().map(|row| DataObject { connection_id: record.public.id.clone(), namespace: row.get("namespace"), name: row.get("name"), kind: row.get("kind"), estimated_rows: row.try_get("estimated_rows").ok() }).collect(), None)) },
-        PoolHandle::Mongodb(client) => timeout(QUERY_TIMEOUT, async {
-            let mut databases = client.list_database_names().authorized_databases(true).await.map_err(|error| format!("Could not list MongoDB databases: {error}"))?;
+        PoolHandle::Mongodb(client) => {
+            let mut databases = timeout(DISCOVERY_TIMEOUT, client.list_database_names().authorized_databases(true))
+                .await
+                .map_err(|_| "MongoDB database discovery timed out.".to_string())?
+                .map_err(|error| format!("Could not list MongoDB databases: {error}"))?;
             databases.retain(|database| !is_mongo_system_namespace(database));
             databases.sort();
             let objects = if let Some(database) = databases.first() {
                 mongo_collection_objects(&record.public.id, &client, database).await?
             } else { Vec::new() };
             Ok((objects, Some(databases)))
-        }).await.map_err(|_| "Schema introspection timed out.".to_string())?,
+        },
     }
 }
 
@@ -93,7 +93,7 @@ pub async fn local_list_namespace_objects(id: String, namespace: String, state: 
     let item = { let records = state.records.read().await; record(&records, &id)?.clone() };
     if !matches!(item.public.kind, DatabaseKind::Mongodb) { return Err("Lazy database expansion is only available for MongoDB connections.".into()); }
     let PoolHandle::Mongodb(client) = state.pool_for(&item).await? else { return Err("MongoDB connection is unavailable.".into()); };
-    let objects = timeout(QUERY_TIMEOUT, mongo_collection_objects(&id, &client, &namespace)).await.map_err(|_| "Collection discovery timed out.".to_string())??;
+    let objects = mongo_collection_objects(&id, &client, &namespace).await?;
     Ok(ObjectListResult { objects, namespaces: None, refreshed_at: Utc::now().to_rfc3339() })
 }
 
