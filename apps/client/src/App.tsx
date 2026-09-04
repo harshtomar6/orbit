@@ -17,6 +17,7 @@ import { clampGridCell, gridCellSelected, gridRange, gridSelectionToTsv, moveGri
 import { orderPinnedColumns, pinnedColumnOffsets } from "./lib/column-pinning";
 import { closeExploreTab as closeExploreTabState, cycleExploreTab, exploreTabId, openExploreTab, type ExploreTab, type ExploreTabTarget, type ExploreTabWorkspace } from "./lib/explore-tabs";
 import { isMongoSystemCollection, isMongoSystemNamespace, restoreMongoObjectKey, visibleMongoNamespaces, visibleMongoObjects } from "./lib/mongo-visibility";
+import { parseSidebarPins, sidebarMatches, sidebarPinKey, type SidebarPin } from "./lib/sidebar";
 
 type Section = "explore" | "ask" | "views";
 type DocumentCountState = { key: string; loading: boolean; result?: DocumentCountResult; error?: string };
@@ -26,6 +27,17 @@ const params = new URLSearchParams(window.location.search);
 const sharedToken = params.get("shared");
 const display = (value: unknown) => value === null ? "NULL" : typeof value === "object" ? JSON.stringify(value) : String(value);
 const icon = (kind: DatabaseConnection["kind"]) => <img className="database-logo" src={`/database-logos/${kind === "postgres" ? "postgresql" : kind}.svg`} alt="" />;
+const sidebarPinsStorageKey = (mode: DatabaseTransportMode, connectionId: string) => `orbit.sidebarPins.${mode}.${connectionId}`;
+const sidebarScrollStorageKey = (mode: DatabaseTransportMode, connectionId: string) => `orbit.sidebarScroll.${mode}.${connectionId}`;
+const readSidebarPins = (mode: DatabaseTransportMode, connectionId: string) => { try { return parseSidebarPins(localStorage.getItem(sidebarPinsStorageKey(mode, connectionId))); } catch { return []; } };
+const relativeCacheAge = (value: string | undefined) => {
+  if (!value) return "Not cached";
+  const elapsed = Math.max(0, Date.now() - new Date(value).getTime());
+  if (elapsed < 60_000) return "Cached just now";
+  if (elapsed < 3_600_000) return `Cached ${Math.floor(elapsed / 60_000)}m ago`;
+  if (elapsed < 86_400_000) return `Cached ${Math.floor(elapsed / 3_600_000)}h ago`;
+  return `Cached ${Math.floor(elapsed / 86_400_000)}d ago`;
+};
 const objectLabel = (connection: DatabaseConnection) => connection.kind === "mongodb" ? "collections" : "tables & views";
 const defaultPort = (kind: DatabaseKind) => kind === "postgres" ? 5432 : kind === "mysql" ? 3306 : 27017;
 const defaultConnectionString = (kind: DatabaseKind) => kind === "postgres" ? "" : "mongodb://localhost:27017";
@@ -44,12 +56,13 @@ const writeExpandedObjectGroups = (mode: DatabaseTransportMode, connectionId: st
 const emptyConnection = (): ConnectionInput => ({ name: "", kind: "mongodb", environment: "development", host: "localhost", port: 27017, database: "", username: "", password: "", tls: true });
 const chartPreviewColumns: DataColumn[] = [{ name: "month", nativeType: "text", nullable: false }, { name: "users", nativeType: "integer", nullable: false }, { name: "revenue", nativeType: "numeric", nullable: false }];
 const chartPreviewRows = [{ month: "Jan", users: 118, revenue: 18400 }, { month: "Feb", users: 154, revenue: 23600 }, { month: "Mar", users: 142, revenue: 22100 }, { month: "Apr", users: 193, revenue: 30700 }, { month: "May", users: 226, revenue: 35800 }, { month: "Jun", users: 271, revenue: 44600 }];
-type IconName = "explore" | "ask" | "views" | "database" | "chevron" | "refresh" | "columns" | "copy" | "download" | "plus" | "sun" | "moon" | "pin" | "sort" | "close";
+type IconName = "explore" | "ask" | "views" | "database" | "chevron" | "chevronDown" | "refresh" | "columns" | "copy" | "download" | "plus" | "sun" | "moon" | "pin" | "sort" | "close" | "table" | "view" | "panel" | "collapse" | "more";
 function AppIcon({ name, size = 16 }: { name: IconName; size?: number }) { const paths: Record<IconName, ReactNode> = {
   explore: <><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></>,
   ask: <><path d="m12 3 1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3Z"/><path d="m5 15 .8 2.2L8 18l-2.2.8L5 21l-.8-2.2L2 18l2.2-.8L5 15Z"/></>,
   views: <><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M10 10v10"/></>, database: <><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v7c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12v7c0 1.7 3.6 3 8 3s8-1.3 8-3v-7"/></>,
-  chevron: <path d="m9 18 6-6-6-6"/>, refresh: <><path d="M20 6v5h-5"/><path d="M18.5 16a8 8 0 1 1 .4-8.5L20 11"/></>, columns: <><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/></>, copy: <><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>, download: <><path d="M12 3v12m0 0 4-4m-4-4"/><path d="M5 21h14"/></>, plus: <path d="M12 5v14M5 12h14"/>, sun: <><circle cx="12" cy="12" r="3.5"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></>, moon: <path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z"/>, pin: <><path d="M9 3h6l-1 7 3 3H7l3-3-1-7Z"/><path d="M12 13v8"/></>, sort: <><path d="M7 6h10M7 12h7M7 18h4"/><path d="m17 15 3 3 3-3M20 18V6"/></>, close: <path d="m6 6 12 12M18 6 6 18"/>,
+  chevron: <path d="m9 18 6-6-6-6"/>, chevronDown: <path d="m6 9 6 6 6-6"/>, refresh: <><path d="M20 6v5h-5"/><path d="M18.5 16a8 8 0 1 1 .4-8.5L20 11"/></>, columns: <><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/></>, copy: <><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></>, download: <><path d="M12 3v12m0 0 4-4m-4-4"/><path d="M5 21h14"/></>, plus: <path d="M12 5v14M5 12h14"/>, sun: <><circle cx="12" cy="12" r="3.5"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M2 12h2m16 0h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></>, moon: <path d="M20 15.5A8.5 8.5 0 0 1 8.5 4 8.5 8.5 0 1 0 20 15.5Z"/>, pin: <><path d="M9 3h6l-1 7 3 3H7l3-3-1-7Z"/><path d="M12 13v8"/></>, sort: <><path d="M7 6h10M7 12h7M7 18h4"/><path d="m17 15 3 3 3-3M20 18V6"/></>, close: <path d="m6 6 12 12M18 6 6 18"/>,
+  table: <><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 10h18M9 10v10"/></>, view: <><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z"/><circle cx="12" cy="12" r="2.5"/></>, panel: <><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M14 9l3 3-3 3"/></>, collapse: <><path d="m8 4 4 4 4-4M8 20l4-4 4 4"/><path d="M12 8v8"/></>, more: <><circle cx="5" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1" fill="currentColor" stroke="none"/></>,
 }; return <svg className="app-icon" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{paths[name]}</svg>; }
 
 export function App() {
@@ -67,6 +80,11 @@ export function App() {
   const [result, setResult] = useState<ExploreResult>();
   const [loading, setLoading] = useState(true); const [error, setError] = useState<ApiRequestError>();
   const [menu, setMenu] = useState(false); const connectionMenuRef = useRef<HTMLDivElement>(null); const [objectSearch, setObjectSearch] = useState(""); const [collapsedObjectGroups, setCollapsedObjectGroups] = useState<Set<string>>(new Set());
+  const [sidebarPins, setSidebarPins] = useState<SidebarPin[]>([]);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("orbit.sidebarCollapsed") === "true");
+  const [schemaCacheState, setSchemaCacheState] = useState<{ refreshedAt?: string; fromCache: boolean }>({ fromCache: false });
+  const objectListElement = useRef<HTMLElement | null>(null);
+  const objectSearchInput = useRef<HTMLInputElement | null>(null);
   const [refreshingSchema, setRefreshingSchema] = useState(false);
   const [loadingObjectGroups, setLoadingObjectGroups] = useState<Set<string>>(new Set()); const [objectGroupErrors, setObjectGroupErrors] = useState<Record<string, string>>({});
   const loadedObjectGroups = useRef<Set<string>>(new Set()); const activeConnectionId = useRef(connectionId); activeConnectionId.current = connectionId;
@@ -79,6 +97,7 @@ export function App() {
   const [selectedRow, setSelectedRow] = useState<Record<string, unknown>>(); const [referenceTrail, setReferenceTrail] = useState<LinkedDocument[]>([]); const [referenceLookup, setReferenceLookup] = useState<ReferenceLookupState>(); const [hidden, setHidden] = useState<Set<string>>(new Set()); const [pinned, setPinned] = useState<Set<string>>(new Set()); const [pinOffsets, setPinOffsets] = useState<Record<string, number>>({});
   const headerCells = useRef<Map<string, HTMLTableCellElement>>(new Map());
   const [gridAnchor, setGridAnchor] = useState<GridCell>({ row: 0, column: 0 }); const [gridActive, setGridActive] = useState<GridCell>({ row: 0, column: 0 }); const [gridCopyNotice, setGridCopyNotice] = useState("");
+  const focusGridAfterQuery = useRef(false);
   const referenceCache = useRef<Map<string, ReferenceLookupResult>>(new Map());
   const [managing, setManaging] = useState(false); const [formOpen, setFormOpen] = useState(false); const [connectionForm, setConnectionForm] = useState<ConnectionInput>(emptyConnection());
   const [connectionString, setConnectionString] = useState(defaultConnectionString("mongodb"));
@@ -139,14 +158,14 @@ export function App() {
   useEffect(() => {
     const dismissDropdowns = (target?: EventTarget | null) => {
       if (!(target instanceof Node) || !connectionMenuRef.current?.contains(target)) setMenu(false);
-      document.querySelectorAll<HTMLDetailsElement>("details.explore-tabs-overflow[open], details.toolbar-menu[open]").forEach((dropdown) => {
+      document.querySelectorAll<HTMLDetailsElement>("details.explore-tabs-overflow[open], details.toolbar-menu[open], details.object-row-menu[open]").forEach((dropdown) => {
         if (!(target instanceof Node) || !dropdown.contains(target)) dropdown.open = false;
       });
     };
     const dismissOnOutsidePointer = (event: PointerEvent) => dismissDropdowns(event.target);
     const dismissAfterSelection = (event: MouseEvent) => {
       if (!(event.target instanceof Element)) return;
-      event.target.closest("details.explore-tabs-overflow button, details.toolbar-menu button")?.closest<HTMLDetailsElement>("details")?.removeAttribute("open");
+      event.target.closest("details.explore-tabs-overflow button, details.toolbar-menu button, details.object-row-menu button")?.closest<HTMLDetailsElement>("details")?.removeAttribute("open");
     };
     const dismissOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") dismissDropdowns(); };
     document.addEventListener("pointerdown", dismissOnOutsidePointer);
@@ -162,7 +181,9 @@ export function App() {
     const handleShortcut = (event: globalThis.KeyboardEvent) => {
       const modifier = event.metaKey || event.ctrlKey;
       if (modifier && event.key.toLowerCase() === "k") { event.preventDefault(); setMenu(false); setCommandOpen((current) => !current); return; }
+      if (!modifier && section === "explore" && event.key === "/" && !(event.target instanceof HTMLInputElement) && !(event.target instanceof HTMLTextAreaElement)) { event.preventDefault(); objectSearchInput.current?.focus(); return; }
       if (!modifier || section !== "explore" || commandOpen || managing) return;
+      if (event.key.toLowerCase() === "b") { event.preventDefault(); setSidebarCollapsed((current) => { localStorage.setItem("orbit.sidebarCollapsed", String(!current)); return !current; }); return; }
       if (event.key.toLowerCase() === "w" && activeExploreTabIdRef.current) { event.preventDefault(); closeExploreWorkspaceTab(activeExploreTabIdRef.current); return; }
       if (event.shiftKey && (event.code === "BracketLeft" || event.code === "BracketRight")) { event.preventDefault(); moveExploreWorkspaceTab(event.code === "BracketLeft" ? -1 : 1); return; }
       if (!event.shiftKey && /^[1-9]$/.test(event.key)) { const tab = exploreTabsRef.current[Number(event.key) - 1]; if (tab) { event.preventDefault(); activateExploreTab(tab); } }
@@ -170,6 +191,17 @@ export function App() {
     window.addEventListener("keydown", handleShortcut);
     return () => window.removeEventListener("keydown", handleShortcut);
   }, [section, commandOpen, managing]);
+
+  useLayoutEffect(() => {
+    if (!connectionId) { setSidebarPins([]); setSchemaCacheState({ fromCache: false }); return; }
+    setSidebarPins(readSidebarPins(transportMode, connectionId));
+    const frame = requestAnimationFrame(() => {
+      if (!objectListElement.current) return;
+      const saved = Number(localStorage.getItem(sidebarScrollStorageKey(transportMode, connectionId))) || 0;
+      objectListElement.current.scrollTop = saved;
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [connectionId, transportMode, section]);
 
   const connection = connections.find((item) => item.id === connectionId);
   const selectedObject = objects.find((item) => objectKey(item) === objectName);
@@ -179,10 +211,11 @@ export function App() {
     const names = new Set(namespaces);
     for (const item of objects) names.add(item.namespace);
     return [...names].sort((left, right) => left.localeCompare(right)).map((namespace) => {
-      const items = objects.filter((item) => item.namespace === namespace && (!needle || `${item.namespace}.${item.name}`.toLowerCase().includes(needle)));
+      const items = objects.filter((item) => item.namespace === namespace && sidebarMatches(needle, item.namespace, item.name));
       return [namespace, items] as const;
-    }).filter(([namespace, items]) => !needle || namespace.toLowerCase().includes(needle) || items.length > 0);
+    }).filter(([namespace, items]) => !needle || sidebarMatches(needle, namespace, "") || items.length > 0);
   }, [objects, namespaces, objectSearch]);
+  const pinnedSidebarObjects = useMemo(() => sidebarPins.map((pin) => objects.find((item) => objectKey(item) === sidebarPinKey(pin)) ?? { connectionId, ...pin }).filter((item) => !objectSearch.trim() || sidebarMatches(objectSearch, item.namespace, item.name)), [sidebarPins, objects, objectSearch, connectionId]);
   const visibleRows = useMemo(() => { const needle = rowSearch.trim().toLowerCase(); if (!needle) return result?.rows ?? []; return (result?.rows ?? []).filter((row) => Object.values(row).some((value) => display(value).toLowerCase().includes(needle))); }, [result, rowSearch]);
   const selectedGridRange = gridRange(gridAnchor, gridActive);
   const selectedGridLabel = `${selectedGridRange.cellCount.toLocaleString()} cell${selectedGridRange.cellCount === 1 ? "" : "s"}`;
@@ -295,6 +328,7 @@ export function App() {
     setLoading(true); setError(undefined); setObjects([]); setNamespaces([]); setResult(undefined); setObjectGroupErrors({}); setLoadingObjectGroups(new Set()); loadedObjectGroups.current.clear();
     const applyResponse = (response: ObjectListResult, fromCache: boolean) => {
       if (!active) return;
+      setSchemaCacheState({ refreshedAt: response.refreshedAt, fromCache });
       const mongoGroups = response.namespaces !== undefined;
       const namespaceList = mongoGroups ? visibleMongoNamespaces(response.namespaces ?? []) : [...new Set(response.objects.map((item) => item.namespace))];
       const firstNamespace = namespaceList[0];
@@ -305,9 +339,9 @@ export function App() {
         loadedObjectGroups.current.add(firstKey);
         if (!fromCache) writeObjectGroupCache(transportMode, connectionId, firstNamespace, combined.filter((item) => item.namespace === firstNamespace));
       }
-      const expanded = mongoGroups ? readExpandedObjectGroups(transportMode, connectionId).filter((namespace) => namespaceList.includes(namespace)) : namespaceList;
+      const expanded = readExpandedObjectGroups(transportMode, connectionId).filter((namespace) => namespaceList.includes(namespace));
+      setCollapsedObjectGroups(new Set(namespaceList.filter((namespace) => !expanded.includes(namespace)).map((namespace) => `${connectionId}:${namespace}`)));
       if (mongoGroups) {
-        setCollapsedObjectGroups(new Set(namespaceList.filter((namespace) => !expanded.includes(namespace)).map((namespace) => `${connectionId}:${namespace}`)));
         for (const namespace of expanded) {
           if (namespace === firstNamespace) continue;
           const cacheKey = `${transportMode}:${connectionId}:${namespace}`;
@@ -322,7 +356,7 @@ export function App() {
             hydrateMongoCollectionCounts(connectionId, namespace, visibleObjects);
           }).catch((reason: unknown) => { if (active) setObjectGroupErrors((current) => ({ ...current, [cacheKey]: reason instanceof Error ? reason.message : String(reason) })); }).finally(() => { if (active) setLoadingObjectGroups((current) => { const next = new Set(current); next.delete(cacheKey); return next; }); });
         }
-      } else setCollapsedObjectGroups(new Set());
+      }
       setNamespaces(namespaceList); setObjects(combined);
       if (mongoGroups && firstNamespace) hydrateMongoCollectionCounts(connectionId, firstNamespace, combined.filter((item) => item.namespace === firstNamespace));
       const pendingObjectKey = transportMode === exploreTransport && pendingExploreObject.current ? objectKey(pendingExploreObject.current) : "";
@@ -364,11 +398,29 @@ export function App() {
       const previous = exploreTabDataCache.current.get(tabId);
       exploreTabDataCache.current.set(tabId, { signature, result: response, ...(previous?.documentCount ? { documentCount: previous.documentCount } : {}) });
       if (activeExploreTabIdRef.current !== tabId || desiredExploreQuerySignature.current !== signature) return;
-      displayedResultSignature.current = signature; setResult(response);
+      displayedResultSignature.current = signature; focusGridAfterQuery.current = true; setResult(response);
     }).catch((reason: unknown) => {
       if (activeExploreTabIdRef.current === tabId && desiredExploreQuerySignature.current === signature) setError(reason instanceof ApiRequestError ? reason : new ApiRequestError(reason instanceof Error ? reason.message : String(reason), "EXPLORE_FAILED"));
     }).finally(() => { if (activeExploreTabIdRef.current === tabId && desiredExploreQuerySignature.current === signature) setLoading(false); });
   }, [connection, selectedObject, filters, sort, dbApi]);
+  useLayoutEffect(() => {
+    if (loading || !focusGridAfterQuery.current) return;
+    focusGridAfterQuery.current = false;
+    if (!visibleRows.length || !visibleColumns.length) return;
+    const next = clampGridCell(gridActive, visibleRows.length, visibleColumns.length);
+    setGridAnchor(next); setGridActive(next);
+    const frame = requestAnimationFrame(() => document.querySelector<HTMLElement>(`[data-grid-cell="${next.row}-${next.column}"]`)?.focus({ preventScroll: true }));
+    return () => cancelAnimationFrame(frame);
+  }, [result, loading]);
+  function refreshCurrentQuery() {
+    if (!connection || !selectedObject || loading) return;
+    if (connection.kind === "mongodb") {
+      const request: DocumentCountRequest = { connectionId: connection.id, namespace: selectedObject.namespace, object: selectedObject.name, ...(filters.length ? { filters } : {}) };
+      documentCountCache.current.delete(`${transportMode}:${documentCountCacheKey(request)}`);
+      setCountRefresh((current) => current + 1);
+    }
+    loadRows(cursors.at(-1));
+  }
   useEffect(() => {
     if (section !== "explore" || !exploreTabsHydrated || !connection || !selectedObject) return;
     const tabId = exploreTabId({ connectionId: connection.id, namespace: selectedObject.namespace, object: selectedObject.name });
@@ -411,14 +463,14 @@ export function App() {
     if (!force && loadedObjectGroups.current.has(cacheKey)) return;
     if (!force) {
       const cached = readObjectGroupCache(transportMode, id, namespace);
-      if (cached) { const visibleObjects = visibleMongoObjects(cached); loadedObjectGroups.current.add(cacheKey); setObjects((current) => mergeNamespaceObjects(current, namespace, visibleObjects)); hydrateMongoCollectionCounts(id, namespace, visibleObjects); return; }
+      if (cached) { const visibleObjects = visibleMongoObjects(cached); loadedObjectGroups.current.add(cacheKey); setObjects((current) => mergeNamespaceObjects(current, namespace, visibleObjects)); hydrateMongoCollectionCounts(id, namespace, visibleObjects); return visibleObjects; }
     }
     setLoadingObjectGroups((current) => new Set(current).add(cacheKey)); setObjectGroupErrors((current) => { const next = { ...current }; delete next[cacheKey]; return next; });
     try {
       const response = await dbApi.objectsInNamespace(id, namespace);
       if (activeConnectionId.current !== id) return;
       const visibleObjects = visibleMongoObjects(response.objects);
-      loadedObjectGroups.current.add(cacheKey); writeObjectGroupCache(transportMode, id, namespace, visibleObjects); setObjects((current) => mergeNamespaceObjects(current, namespace, visibleObjects)); hydrateMongoCollectionCounts(id, namespace, visibleObjects);
+      loadedObjectGroups.current.add(cacheKey); writeObjectGroupCache(transportMode, id, namespace, visibleObjects); setObjects((current) => mergeNamespaceObjects(current, namespace, visibleObjects)); hydrateMongoCollectionCounts(id, namespace, visibleObjects); return visibleObjects;
     } catch (reason) {
       if (activeConnectionId.current === id) setObjectGroupErrors((current) => ({ ...current, [cacheKey]: reason instanceof Error ? reason.message : String(reason) }));
     } finally {
@@ -436,6 +488,7 @@ export function App() {
       const namespaceList = mongoGroups ? visibleMongoNamespaces(response.namespaces ?? []) : [...new Set(response.objects.map((item) => item.namespace))];
       const visibleObjects = mongoGroups ? visibleMongoObjects(response.objects) : response.objects;
       const visibleResponse = mongoGroups ? { ...response, namespaces: namespaceList, objects: visibleObjects } : response;
+      setSchemaCacheState({ refreshedAt: response.refreshedAt, fromCache: false });
       try { localStorage.removeItem(objectSchemaCacheKey(transportMode, id)); } catch { /* cache is optional */ }
       for (const namespace of new Set([...namespaces, ...namespaceList])) { try { localStorage.removeItem(objectGroupCacheKey(transportMode, id, namespace)); } catch { /* cache is optional */ } }
       writeObjectSchemaCache(transportMode, id, visibleResponse);
@@ -448,7 +501,8 @@ export function App() {
         await Promise.all(expanded.filter((namespace) => namespace !== firstNamespace).map((namespace) => loadNamespaceObjects(namespace, true)));
         if (objectName && !visibleObjects.some((item) => objectKey(item) === objectName)) { setObjectName(""); objectSelection.current[transportMode] = ""; localStorage.removeItem(`orbit.object.${transportMode}`); setResult(undefined); }
       } else {
-        setCollapsedObjectGroups(new Set());
+        const expanded = readExpandedObjectGroups(transportMode, id).filter((namespace) => namespaceList.includes(namespace));
+        setCollapsedObjectGroups(new Set(namespaceList.filter((namespace) => !expanded.includes(namespace)).map((namespace) => `${id}:${namespace}`)));
         if (objectName && !visibleObjects.some((item) => objectKey(item) === objectName)) setObjectName(visibleObjects[0] ? objectKey(visibleObjects[0]) : "");
       }
       setCountRefresh((current) => current + 1); await reloadConnections();
@@ -479,7 +533,10 @@ export function App() {
       if (tableScrollElement.current) exploreScrollPositions.current[previousId] = { left: tableScrollElement.current.scrollLeft, top: tableScrollElement.current.scrollTop };
       if (result && displayedResultSignature.current) exploreTabDataCache.current.set(previousId, { signature: displayedResultSignature.current, result, ...(documentCount ? { documentCount } : {}) });
     }
-    if (switchingTabs) pendingExploreTabActivation.current = { tabId: tab.id, ...(tab.cursors.at(-1) ? { cursor: tab.cursors.at(-1) } : {}) };
+    if (switchingTabs) {
+      pendingExploreTabActivation.current = { tabId: tab.id, ...(tab.cursors.at(-1) ? { cursor: tab.cursors.at(-1) } : {}) };
+      focusGridAfterQuery.current = true;
+    }
     activeExploreTabIdRef.current = tab.id; setActiveExploreTabId(tab.id);
     connectionSelection.current[exploreTransport] = tab.connectionId; objectSelection.current[exploreTransport] = `${tab.namespace}.${tab.object}`;
     localStorage.setItem(`orbit.connection.${exploreTransport}`, tab.connectionId); localStorage.setItem(`orbit.object.${exploreTransport}`, `${tab.namespace}.${tab.object}`);
@@ -530,7 +587,83 @@ export function App() {
   function toggleObjectGroup(namespace: string) {
     const key = `${connectionId}:${namespace}`; const expanding = collapsedObjectGroups.has(key);
     const next = new Set(collapsedObjectGroups); if (expanding) next.delete(key); else next.add(key); setCollapsedObjectGroups(next);
-    if (connection?.kind === "mongodb") { writeExpandedObjectGroups(transportMode, connectionId, namespaces.filter((item) => !next.has(`${connectionId}:${item}`))); if (expanding) void loadNamespaceObjects(namespace); }
+    writeExpandedObjectGroups(transportMode, connectionId, namespaces.filter((item) => !next.has(`${connectionId}:${item}`)));
+    if (connection?.kind === "mongodb" && expanding) void loadNamespaceObjects(namespace);
+  }
+  function collapseAllObjectGroups() {
+    setCollapsedObjectGroups(new Set(namespaces.map((namespace) => `${connectionId}:${namespace}`)));
+    writeExpandedObjectGroups(transportMode, connectionId, []);
+  }
+  function toggleSidebar() {
+    setSidebarCollapsed((current) => { localStorage.setItem("orbit.sidebarCollapsed", String(!current)); return !current; });
+  }
+  function toggleSidebarPin(item: Pick<DataObject, "namespace" | "name" | "kind" | "estimatedRows">) {
+    setSidebarPins((current) => {
+      const key = sidebarPinKey(item);
+      const next = current.some((pin) => sidebarPinKey(pin) === key) ? current.filter((pin) => sidebarPinKey(pin) !== key) : [...current, { namespace: item.namespace, name: item.name, kind: item.kind, ...(item.estimatedRows == null ? {} : { estimatedRows: item.estimatedRows }) }];
+      try { localStorage.setItem(sidebarPinsStorageKey(transportMode, connectionId), JSON.stringify(next)); } catch { /* persistence is optional */ }
+      return next;
+    });
+  }
+  function openSidebarObject(item: Pick<DataObject, "namespace" | "name">, persistent = false) {
+    const current = objects.find((object) => objectKey(object) === objectKey(item));
+    if (current) { selectObject(current, persistent); return; }
+    if (connection?.kind !== "mongodb") return;
+    if (collapsedObjectGroups.has(`${connectionId}:${item.namespace}`)) toggleObjectGroup(item.namespace);
+    void loadNamespaceObjects(item.namespace).then((loaded) => {
+      const target = loaded?.find((object) => objectKey(object) === objectKey(item));
+      if (target) openExploreObject(target, persistent);
+    });
+  }
+  function refreshSidebarObject(item: Pick<DataObject, "namespace">) {
+    if (connection?.kind === "mongodb") void loadNamespaceObjects(item.namespace, true);
+    else void refreshObjectSchema();
+  }
+  function handleSidebarKeyDown(event: ReactKeyboardEvent<HTMLElement>) {
+    if (!(event.target instanceof HTMLElement) || event.target.matches("input, summary") || event.target.closest(".object-row-menu")) return;
+    const current = event.target.closest<HTMLElement>("[data-tree-item]");
+    if (!current) return;
+    const items = [...event.currentTarget.querySelectorAll<HTMLElement>("[data-tree-item]")].filter((item) => item.offsetParent !== null);
+    const index = items.indexOf(current);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp" || event.key === "Home" || event.key === "End") {
+      event.preventDefault();
+      const targetIndex = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : Math.max(0, Math.min(items.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)));
+      items[targetIndex]?.focus();
+      return;
+    }
+    if (event.key === "ArrowRight" && current.dataset.treeKind === "database") {
+      event.preventDefault();
+      if (current.getAttribute("aria-expanded") === "false") current.click();
+      else items.find((item) => item.dataset.treeParent === current.dataset.treeKey)?.focus();
+      return;
+    }
+    if (event.key === "ArrowLeft") {
+      if (current.dataset.treeKind === "database" && current.getAttribute("aria-expanded") === "true") { event.preventDefault(); current.click(); return; }
+      const parent = items.find((item) => item.dataset.treeKind === "database" && item.dataset.treeKey === current.dataset.treeParent);
+      if (parent) { event.preventDefault(); parent.focus(); }
+      return;
+    }
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && current.dataset.treeKind === "object") {
+      const namespace = current.dataset.namespace; const name = current.dataset.object;
+      if (!namespace || !name) return;
+      event.preventDefault(); openSidebarObject({ namespace, name }, true);
+    }
+  }
+  function renderSidebarObjectRow(item: Pick<DataObject, "namespace" | "name" | "kind" | "estimatedRows">, pinnedSection = false) {
+    const key = objectKey(item); const isPinned = sidebarPins.some((pin) => sidebarPinKey(pin) === key); const active = key === objectName;
+    return <div className={`object-row${active ? " active" : ""}`} key={`${pinnedSection ? "pin" : "tree"}:${key}`}>
+      <button className="object-row-main" role="treeitem" aria-selected={active} data-tree-item data-tree-kind="object" data-tree-parent={pinnedSection ? undefined : item.namespace} data-namespace={item.namespace} data-object={item.name} onClick={() => openSidebarObject(item)} onDoubleClick={() => openSidebarObject(item, true)} title={`${item.namespace}.${item.name}`}>
+        <span className={`object-kind-icon ${item.kind}`} aria-hidden="true">{item.kind === "collection" ? null : <AppIcon name={item.kind === "view" ? "view" : "table"} size={12} />}</span>
+        <span className="object-row-name">{item.name}</span>
+        <span className="object-row-count" title={item.estimatedRows == null ? "Estimate loading or unavailable" : `${item.estimatedRows.toLocaleString()} estimated ${item.kind === "collection" ? "documents" : "rows"}`}>{item.estimatedRows == null ? "—" : formatCompactCount(item.estimatedRows)}</span>
+      </button>
+      <details className="object-row-menu"><summary aria-label={`Actions for ${item.name}`} title={`Actions for ${item.name}`}><AppIcon name="more" size={14} /></summary><div>
+        <button onClick={() => openSidebarObject(item, true)}><span>↗</span> Open in permanent tab</button>
+        <button onClick={() => toggleSidebarPin(item)}><AppIcon name="pin" size={13} /> {isPinned ? "Unpin from sidebar" : "Pin to sidebar"}</button>
+        <button onClick={() => void navigator.clipboard.writeText(key)}><AppIcon name="copy" size={13} /> Copy qualified name</button>
+        <button onClick={() => refreshSidebarObject(item)}><AppIcon name="refresh" size={13} /> Refresh metadata</button>
+      </div></details>
+    </div>;
   }
   function revealNamespace(namespace: string) {
     setSection("explore");
@@ -592,7 +725,7 @@ export function App() {
     { id: "action-add-connection", label: "Add database connection", description: `Create a ${transportMode} connection`, keywords: ["new", "connect"], category: "action", group: "Actions", icon: "+", run: () => { setManaging(true); openCreate(); } },
     ...(connectionId ? [{ id: "action-refresh-schema", label: "Refresh databases and schema", description: connection?.name ?? "Current connection", keywords: ["reload", "collections", "tables"], category: "action" as const, group: "Actions", icon: "↻", shortcut: "⌘R", disabled: refreshingSchema, run: refreshObjectSchema }] : []),
     ...(selectedObject ? [
-      { id: "action-refresh-data", label: "Refresh current data", description: `${selectedObject.namespace}.${selectedObject.name}`, keywords: ["reload", "rows", "documents"], category: "action" as const, group: "Current table", icon: "↻", run: () => loadRows(cursors.at(-1)) },
+      { id: "action-refresh-data", label: "Refresh current data", description: `${selectedObject.namespace}.${selectedObject.name}`, keywords: ["reload", "rows", "documents"], category: "action" as const, group: "Current table", icon: "↻", disabled: loading, run: refreshCurrentQuery },
       { id: "action-export-csv", label: "Export loaded rows as CSV", description: `${visibleRows.length.toLocaleString()} rows`, keywords: ["download"], category: "action" as const, group: "Current table", icon: "↓", run: () => exportRows("csv") },
       { id: "action-export-json", label: "Export loaded rows as JSON", description: `${visibleRows.length.toLocaleString()} rows`, keywords: ["download"], category: "action" as const, group: "Current table", icon: "{}", run: () => exportRows("json") },
       ...(transportMode === "gateway" ? [
@@ -626,21 +759,40 @@ export function App() {
       <section className="onboarding-card">
         {onboardingStep === 1 ? <><header><small>STEP 1 OF 2</small><h2>What are you connecting?</h2><p>Choose a database to configure a direct, read-only connection.</p></header><div className="database-choices">{([{"kind":"mongodb","name":"MongoDB","description":"Use a standard or Atlas connection string."},{"kind":"postgres","name":"PostgreSQL","description":"Use a standard or hosted Postgres connection string."},{"kind":"mysql","name":"MySQL","description":"Connect with host, port, and credentials."}] as const).map((option) => <button className={connectionForm.kind === option.kind ? "selected" : ""} key={option.kind} onClick={() => { setConnectionForm({ ...emptyConnection(), kind: option.kind, port: defaultPort(option.kind) }); setConnectionString(defaultConnectionString(option.kind)); }}><span className={`db-icon ${option.kind}`}>{icon(option.kind)}</span><div><strong>{option.name}</strong><p>{option.description}</p></div><i>{connectionForm.kind === option.kind ? "✓" : ""}</i></button>)}</div><footer><span>You can add more connections later.</span><button className="primary" onClick={() => setOnboardingStep(2)}>Continue <AppIcon name="chevron" size={14} /></button></footer></> : <form onSubmit={saveConnection}><header><small>STEP 2 OF 2</small><h2>Connect to {connectionForm.kind === "mongodb" ? "MongoDB" : connectionForm.kind === "postgres" ? "PostgreSQL" : "MySQL"}</h2><p>Orbit tests the connection before storing it on this device.</p></header><div className="onboarding-fields"><div className="form-row"><label>Connection name<input autoFocus required value={connectionForm.name} placeholder="Production analytics" onChange={(event) => setConnectionForm({ ...connectionForm, name: event.target.value })} /></label><label>Environment<select value={connectionForm.environment} onChange={(event) => setConnectionForm({ ...connectionForm, environment: event.target.value as ConnectionEnvironment })}><option value="development">Development</option><option value="staging">Staging</option><option value="production">Production</option></select></label></div>{connectionForm.kind !== "mysql" ? <label>Connection string<input required type="password" autoComplete="off" spellCheck={false} value={connectionString} placeholder={connectionForm.kind === "postgres" ? "postgresql://user:password@host:5432/database?sslmode=require" : "mongodb+srv://user:password@cluster.example.net"} onChange={(event) => setConnectionString(event.target.value)} /><small>{connectionForm.kind === "postgres" ? "Include the database name in the URL. Provider-specific SSL parameters are preserved." : "Orbit will discover every database and collection this account can access."}</small></label> : <><div className="form-row"><label>Host<input required value={connectionForm.host} onChange={(event) => setConnectionForm({ ...connectionForm, host: event.target.value })} /></label><label>Port<input required type="number" value={connectionForm.port} onChange={(event) => setConnectionForm({ ...connectionForm, port: Number(event.target.value) })} /></label></div><label>Database<input required value={connectionForm.database} onChange={(event) => setConnectionForm({ ...connectionForm, database: event.target.value })} /></label><div className="form-row"><label>Username<input required autoComplete="username" value={connectionForm.username} onChange={(event) => setConnectionForm({ ...connectionForm, username: event.target.value })} /></label><label>Password<input required type="password" autoComplete="new-password" value={connectionForm.password} onChange={(event) => setConnectionForm({ ...connectionForm, password: event.target.value })} /></label></div><label className="checkbox"><input type="checkbox" checked={connectionForm.tls} onChange={(event) => setConnectionForm({ ...connectionForm, tls: event.target.checked })} /> Require TLS</label></>}{managerError && <div className="form-error">{managerError}</div>}</div><footer><button type="button" onClick={() => { setManagerError(""); setOnboardingStep(1); }}>Back</button><button className="primary" disabled={saving}>{saving ? <><span className="button-spinner" /> Testing connection…</> : <>Test & connect <AppIcon name="chevron" size={14} /></>}</button></footer></form>}
       </section>
+      <aside className="onboarding-guide">
+        <header><span>i</span><div><strong>Before you connect</strong><small>What Orbit needs</small></div></header>
+        <div>
+          <p><AppIcon name="database" size={16} /><span>A database account with permission to read the data you want to explore.</span></p>
+          <p><AppIcon name="copy" size={16} /><span>{connectionForm.kind === "mongodb" ? "A MongoDB or Atlas connection string." : connectionForm.kind === "postgres" ? "A PostgreSQL connection URL with its database name." : "The host, port, database, and user credentials."}</span></p>
+          <p><AppIcon name="pin" size={16} /><span>Credentials stay on this device and are stored using your operating system keychain.</span></p>
+        </div>
+      </aside>
     </main>
   </div>;
   return <div className={`orbit-shell ${runtime}`}>
     <header className="orbit-topbar">
-      <div className="topbar-brand" data-tauri-drag-region onMouseDown={startWindowDrag}><div className="orbit-logo" role="img" aria-label="Orbit" /></div>
+      <div className="topbar-brand" data-tauri-drag-region onMouseDown={startWindowDrag}><div className="orbit-logo" role="img" aria-label="Orbit" /><strong>Orbit</strong></div>
       <nav className="topbar-nav" aria-label="Primary navigation">{(["explore", "ask", "views"] as Section[]).map((item) => <button className={section === item ? "active" : ""} title={`${item.charAt(0).toUpperCase() + item.slice(1)}${runtime === "desktop" ? item === "explore" ? " · Direct connection" : " · Gateway" : ""}`} key={item} onClick={() => setSection(item)}><AppIcon name={item} size={14} /><span>{item}</span></button>)}</nav>
       <button className="command-trigger" onClick={() => { setMenu(false); setCommandOpen(true); }} aria-haspopup="dialog"><span>⌕</span><span>Search or jump to…</span><kbd>⌘K</kbd></button>
       <div className="topbar-drag-region" data-tauri-drag-region onMouseDown={startWindowDrag} />
       <div className="connection-wrap" ref={connectionMenuRef}><button className="connection-button" onClick={() => setMenu(!menu)} aria-expanded={menu}>{connection ? <><span className={`db-icon ${connection.kind}`}>{icon(connection.kind)}</span><span className="connection-copy"><strong>{connection.name}</strong><small>{connection.database} · {transportMode === "local" ? "Direct" : "Gateway"}</small></span><span className={`mode-dot ${transportMode}`} /><AppIcon name="chevron" size={13} /></> : <><AppIcon name="database" /><strong>No connection</strong><AppIcon name="chevron" size={13} /></>}</button>{menu && <div className="connection-menu"><label>{transportMode === "local" ? "Direct connections" : "Workspace connections"}</label>{connections.map((item) => <button className={item.id === connectionId ? "active" : ""} key={item.id} onClick={() => selectConnection(item.id)}><span className={`db-icon ${item.kind}`}>{icon(item.kind)}</span><span><strong>{item.name}</strong><small>{item.environment} · {item.database} · {item.latencyMs ?? "—"} ms</small></span>{item.id === connectionId && <b>✓</b>}</button>)}<button className="manage" onClick={() => { setMenu(false); setManaging(true); }}><AppIcon name="plus" /> Add or manage connections</button><button className="appearance" onClick={() => { setTheme((current) => current === "dark" ? "light" : "dark"); setMenu(false); }}><AppIcon name={theme === "dark" ? "sun" : "moon"} /><span><strong>Appearance</strong><small>{theme === "dark" ? "Dark" : "Light"} mode</small></span></button></div>}</div>
     </header>
     <main className="orbit-content">
-      {section === "explore" && <section className="explore-screen"><div className={`explore-layout${resizingSidebar ? " resizing-sidebar" : ""}`} style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}>
-        <aside className="object-list"><div className="object-list-toolbar"><input placeholder={`Search ${connection ? objectLabel(connection) : "objects"}`} value={objectSearch} onChange={(event) => setObjectSearch(event.target.value)} aria-label="Search objects" /><button className={refreshingSchema ? "refreshing" : ""} disabled={!connectionId || refreshingSchema} onClick={() => void refreshObjectSchema()} title="Refresh databases and expanded collections" aria-label="Refresh databases and expanded collections"><AppIcon name="refresh" size={14} /></button></div>{objectGroups.map(([namespace, items]) => { const stateKey = `${transportMode}:${connectionId}:${namespace}`; const collapsed = collapsedObjectGroups.has(`${connectionId}:${namespace}`); const groupLoading = loadingObjectGroups.has(stateKey); const groupError = objectGroupErrors[stateKey]; const loaded = loadedObjectGroups.current.has(stateKey) || connection?.kind !== "mongodb"; return <section className={`object-group${collapsed ? " collapsed" : ""}`} key={namespace}><button className="object-group-header" type="button" aria-expanded={!collapsed} onClick={() => toggleObjectGroup(namespace)} title={namespace}><span className="object-group-chevron">⌄</span><span className="object-group-database-icon"><AppIcon name="database" size={13} /></span><strong>{namespace}</strong><b>{groupLoading ? "…" : loaded ? items.length : "—"}</b></button>{!collapsed && <div className="object-group-items">{groupLoading ? <p className="object-group-state"><span className="spinner" /> Loading collections…</p> : groupError ? <button className="object-group-retry" title={groupError} onClick={() => void loadNamespaceObjects(namespace, true)}>{/timed out/i.test(groupError) ? "Collection loading timed out · Retry" : "Couldn’t load collections · Retry"}</button> : items.length ? items.map((item) => <button className={objectKey(item) === objectName ? "active" : ""} key={objectKey(item)} onClick={() => selectObject(item)} onDoubleClick={() => selectObject(item, true)}><span className={`object-kind-icon ${item.kind}`} aria-hidden="true">{item.kind === "collection" ? "" : item.kind === "view" ? "◇" : "▦"}</span><span className="object-row-name">{item.name}</span><span className="object-row-count" title={item.estimatedRows == null ? "Estimate loading or unavailable" : `${item.estimatedRows.toLocaleString()} estimated ${item.kind === "collection" ? "documents" : "rows"}`}>{item.estimatedRows == null ? "—" : formatCompactCount(item.estimatedRows)}</span></button>) : <p className="object-group-state">No collections</p>}</div>}</section>; })}{!loading && !objectGroups.length && <p className="empty-copy">No accessible objects.</p>}</aside>
+      {section === "explore" && <section className="explore-screen"><div className={`explore-layout${resizingSidebar ? " resizing-sidebar" : ""}${sidebarCollapsed ? " sidebar-collapsed" : ""}`} style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}>
+        <aside className="object-list" aria-label="Database navigator">
+          <header className="object-list-heading"><div><strong>Data navigator</strong><small>{connection?.name ?? "No connection"}</small></div><div><button disabled={!namespaces.length} onClick={collapseAllObjectGroups} title="Collapse all databases" aria-label="Collapse all databases"><AppIcon name="collapse" size={14} /></button><button onClick={toggleSidebar} title="Hide sidebar · ⌘B" aria-label="Hide database sidebar"><AppIcon name="panel" size={14} /></button></div></header>
+          <div className="object-list-toolbar"><span>⌕</span><input ref={objectSearchInput} placeholder={`Search ${connection ? objectLabel(connection) : "objects"}`} value={objectSearch} onChange={(event) => setObjectSearch(event.target.value)} aria-label="Search objects" /><kbd>/</kbd><button className={refreshingSchema ? "refreshing" : ""} disabled={!connectionId || refreshingSchema} onClick={() => void refreshObjectSchema()} title="Refresh databases and expanded collections" aria-label="Refresh databases and expanded collections"><AppIcon name="refresh" size={14} /></button></div>
+          <div className="object-list-scroll" ref={(element) => { objectListElement.current = element; }} role="tree" aria-label="Databases and objects" onKeyDown={handleSidebarKeyDown} onScroll={(event) => { if (connectionId) localStorage.setItem(sidebarScrollStorageKey(transportMode, connectionId), String(event.currentTarget.scrollTop)); }}>
+            {pinnedSidebarObjects.length > 0 && <section className="pinned-object-group"><header><span>PINNED</span><b>{pinnedSidebarObjects.length}</b></header><div className="object-group-items">{pinnedSidebarObjects.map((item) => renderSidebarObjectRow(item, true))}</div></section>}
+            <div className="object-list-section-label"><span>DATABASES</span><b>{namespaces.length}</b></div>
+            {objectGroups.map(([namespace, items]) => { const stateKey = `${transportMode}:${connectionId}:${namespace}`; const collapsed = !objectSearch.trim() && collapsedObjectGroups.has(`${connectionId}:${namespace}`); const groupLoading = loadingObjectGroups.has(stateKey); const groupError = objectGroupErrors[stateKey]; const loaded = loadedObjectGroups.current.has(stateKey) || connection?.kind !== "mongodb"; return <section className={`object-group${collapsed ? " collapsed" : ""}`} key={namespace}><button className="object-group-header" type="button" role="treeitem" data-tree-item data-tree-kind="database" data-tree-key={namespace} aria-expanded={!collapsed} onClick={() => toggleObjectGroup(namespace)} title={namespace}><span className="object-group-chevron"><AppIcon name="chevronDown" size={12} /></span><span className="object-group-database-icon"><AppIcon name="database" size={14} /></span><strong>{namespace}</strong><b>{groupLoading ? "…" : loaded ? items.length : "—"}</b></button>{!collapsed && <div className="object-group-items" role="group">{groupLoading ? <div className="object-group-skeleton" aria-label="Loading collections"><i /><i /><i /></div> : groupError ? <button className="object-group-retry" title={groupError} onClick={() => void loadNamespaceObjects(namespace, true)}>{/timed out/i.test(groupError) ? "Loading timed out · Retry" : "Couldn’t load · Retry"}</button> : items.length ? items.map((item) => renderSidebarObjectRow(item)) : <p className="object-group-state">No accessible objects</p>}</div>}</section>; })}
+            {!loading && !objectGroups.length && <p className="empty-copy">No matching databases or objects.</p>}
+          </div>
+          <footer className="object-list-footer"><span className={schemaCacheState.fromCache ? "cached" : ""} /><p>{namespaces.length} database{namespaces.length === 1 ? "" : "s"} · {objects.length} loaded</p><time title={schemaCacheState.refreshedAt ?? connection?.lastSchemaRefresh}>{relativeCacheAge(schemaCacheState.refreshedAt ?? connection?.lastSchemaRefresh)}</time></footer>
+        </aside>
+        {sidebarCollapsed && <button className="sidebar-collapsed-toggle" onClick={toggleSidebar} title="Show sidebar · ⌘B" aria-label="Show database sidebar"><AppIcon name="panel" size={15} /></button>}
         <div className="sidebar-resize-handle" role="separator" aria-label="Resize database sidebar" aria-orientation="vertical" aria-valuemin={190} aria-valuemax={320} aria-valuenow={sidebarWidth} tabIndex={0} onPointerDown={startSidebarResize} onKeyDown={(event) => { const delta = event.key === "ArrowLeft" ? -8 : event.key === "ArrowRight" ? 8 : 0; if (!delta) return; event.preventDefault(); const width = clampSidebarWidth(sidebarWidth + delta); setSidebarWidth(width); localStorage.setItem("orbit.sidebarWidth", String(width)); }} onDoubleClick={() => { setSidebarWidth(224); localStorage.setItem("orbit.sidebarWidth", "224"); }} />
-        <div className="data-grid-wrap">{exploreTabs.length > 0 && <div className="explore-tabs-bar"><div className="explore-tabs-list" role="tablist" aria-label="Open data objects">{exploreTabs.map((tab, index) => <div className={`explore-tab${tab.id === activeExploreTabId ? " active" : ""}${tab.preview ? " preview" : ""}`} role="tab" aria-selected={tab.id === activeExploreTabId} tabIndex={tab.id === activeExploreTabId ? 0 : -1} title={`${tab.connectionName} · ${tab.namespace}.${tab.object}${tab.preview ? " · Preview" : ""}`} key={tab.id} onClick={() => activateExploreTab(tab)} onDoubleClick={() => promoteExploreWorkspaceTab(tab.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activateExploreTab(tab); } }}><span className={`explore-tab-kind ${tab.databaseKind}`}>{icon(tab.databaseKind)}</span><span className="explore-tab-copy"><strong>{tab.object}</strong><small>{tab.connectionName} · {tab.namespace}</small></span>{tab.preview && <button className="explore-tab-pin" onClick={(event) => { event.stopPropagation(); promoteExploreWorkspaceTab(tab.id); }} title="Keep tab open" aria-label={`Keep ${tab.object} tab open`}>◇</button>}<button className="explore-tab-close" onClick={(event) => { event.stopPropagation(); closeExploreWorkspaceTab(tab.id); }} title={`Close ${tab.object} · ⌘W`} aria-label={`Close ${tab.object}`}>×</button>{index < 9 && <kbd>{index + 1}</kbd>}</div>)}</div>{exploreTabs.length > 6 && <details className="explore-tabs-overflow" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}><summary title="All open tabs">⌄ <span>{exploreTabs.length}</span></summary><div>{exploreTabs.map((tab) => <button className={tab.id === activeExploreTabId ? "active" : ""} key={tab.id} onClick={(event) => { activateExploreTab(tab); event.currentTarget.closest("details")?.removeAttribute("open"); }}><span>{tab.databaseKind === "mongodb" ? "●" : "▦"}</span><span><strong>{tab.object}</strong><small>{tab.connectionName} · {tab.namespace}</small></span>{tab.preview && <em>Preview</em>}</button>)}</div></details>}</div>}<div className="grid-title"><div className="dataset-breadcrumb"><span>{selectedObject?.namespace ?? connection?.name ?? "Orbit"}</span><b>/</b><strong>{selectedObject?.name ?? (connection ? "Select an object" : "Add a database connection")}</strong></div>{selectedObject && <span>{objectTotal == null ? "Count unavailable" : `${objectTotalApproximate ? "~" : ""}${objectTotal.toLocaleString()} ${objectNoun}`} · {result?.columns.length ?? "—"} {connection?.kind === "mongodb" ? "fields" : "columns"}</span>}<button className={`icon-button${refreshingSchema ? " refreshing" : ""}`} disabled={!connectionId || refreshingSchema} onClick={() => void refreshObjectSchema()} title="Refresh schema" aria-label="Refresh schema"><AppIcon name="refresh" size={14} /></button>{transportMode === "gateway" && selectedObject && <details className="toolbar-menu dataset-actions" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}><summary aria-label="Dataset actions" title="Dataset actions">•••</summary><div><button onClick={() => { setSaveName(selectedObject.name); setSaveDialog("explore"); }}>▥ Save as view</button><button onClick={() => setSection("ask")}>✦ Ask about this data</button></div></details>}</div>
+        <div className="data-grid-wrap">{exploreTabs.length > 0 && <div className="explore-tabs-bar"><div className="explore-tabs-list" role="tablist" aria-label="Open data objects">{exploreTabs.map((tab, index) => <div className={`explore-tab${tab.id === activeExploreTabId ? " active" : ""}${tab.preview ? " preview" : ""}`} role="tab" aria-selected={tab.id === activeExploreTabId} tabIndex={tab.id === activeExploreTabId ? 0 : -1} title={`${tab.connectionName} · ${tab.namespace}.${tab.object}${tab.preview ? " · Preview" : ""}`} key={tab.id} onClick={() => activateExploreTab(tab)} onDoubleClick={() => promoteExploreWorkspaceTab(tab.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); activateExploreTab(tab); } }}><span className={`explore-tab-kind ${tab.databaseKind}`}>{icon(tab.databaseKind)}</span><span className="explore-tab-copy"><strong>{tab.object}</strong><small>{tab.connectionName} · {tab.namespace}</small></span>{tab.preview && <button className="explore-tab-pin" onClick={(event) => { event.stopPropagation(); promoteExploreWorkspaceTab(tab.id); }} title="Keep tab open" aria-label={`Keep ${tab.object} tab open`}>◇</button>}<button className="explore-tab-close" onClick={(event) => { event.stopPropagation(); closeExploreWorkspaceTab(tab.id); }} title={`Close ${tab.object} · ⌘W`} aria-label={`Close ${tab.object}`}>×</button>{index < 9 && <kbd>{index + 1}</kbd>}</div>)}</div>{exploreTabs.length > 6 && <details className="explore-tabs-overflow" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}><summary title="All open tabs">⌄ <span>{exploreTabs.length}</span></summary><div>{exploreTabs.map((tab) => <button className={tab.id === activeExploreTabId ? "active" : ""} key={tab.id} onClick={(event) => { activateExploreTab(tab); event.currentTarget.closest("details")?.removeAttribute("open"); }}><span>{tab.databaseKind === "mongodb" ? "●" : "▦"}</span><span><strong>{tab.object}</strong><small>{tab.connectionName} · {tab.namespace}</small></span>{tab.preview && <em>Preview</em>}</button>)}</div></details>}</div>}<div className="grid-title"><div className="dataset-breadcrumb"><span>{selectedObject?.namespace ?? connection?.name ?? "Orbit"}</span><b>/</b><strong>{selectedObject?.name ?? (connection ? "Select an object" : "Add a database connection")}</strong></div>{selectedObject && <span>{objectTotal == null ? "Count unavailable" : `${objectTotalApproximate ? "~" : ""}${objectTotal.toLocaleString()} ${objectNoun}`} · {result?.columns.length ?? "—"} {connection?.kind === "mongodb" ? "fields" : "columns"}</span>}<button className={`icon-button${loading ? " refreshing" : ""}`} disabled={!connection || !selectedObject || loading} onClick={refreshCurrentQuery} title="Refresh current query" aria-label="Refresh current query"><AppIcon name="refresh" size={14} /></button>{transportMode === "gateway" && selectedObject && <details className="toolbar-menu dataset-actions" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}><summary aria-label="Dataset actions" title="Dataset actions">•••</summary><div><button onClick={() => { setSaveName(selectedObject.name); setSaveDialog("explore"); }}>▥ Save as view</button><button onClick={() => setSection("ask")}>✦ Ask about this data</button></div></details>}</div>
           <div className="grid-tools">{connection && selectedObject && <ExploreQueryControls columns={result?.columns ?? []} filters={filters} sort={sort} databaseKind={connection.kind} namespace={selectedObject.namespace} object={selectedObject.name} offset={cursors.length * 50} onFiltersChange={setFilters} onSortChange={setSort} />}<button onClick={() => setHidden(new Set())}><AppIcon name="columns" /> {hidden.size ? `${hidden.size} hidden` : "Columns"}</button>{selectedGridRange.cellCount > 1 && <button disabled={!visibleRows.length || !visibleColumns.length} onClick={() => void copyGridSelection()} title="Copy selection · ⌘C"><AppIcon name="copy" /> {gridCopyNotice || `Copy ${selectedGridLabel}`}</button>}<span className="grid-tools-spacer" /><label className="loaded-row-search"><span>⌕</span><input aria-label="Search loaded rows" placeholder="Search loaded rows" value={rowSearch} onChange={(event) => { setRowSearch(event.target.value); updateUrl(connectionId, objectName, event.target.value); }} /></label><details className="toolbar-menu export-menu" onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) event.currentTarget.open = false; }}><summary><AppIcon name="download" size={13} /> Export</summary><div><button onClick={() => exportRows("csv")}>Export CSV</button><button onClick={() => exportRows("json")}>Export JSON</button></div></details></div>
           {!connection ? <div className="no-connections-state"><span className="empty-db-mark">◎</span><h2>Connect your first database</h2><p>Add a local MongoDB connection to browse collections and inspect documents without routing credentials through a server.</p><button className="primary" onClick={() => { setManaging(true); openCreate(); }}>＋ Add database connection</button><small>Credentials are stored in your operating system keychain.</small></div> : error ? <div className="status-state error"><strong>{error.code === "QUERY_TIMEOUT" ? "Query timed out" : error.code === "UNAUTHORIZED" ? "Permission denied" : "Couldn’t load data"}</strong><p>{error.message}</p>{error.requestId && <code>Request {error.requestId}</code>}<button onClick={() => loadRows()}>Try again</button></div> : loading ? <div className="status-state"><span className="spinner" /><strong>Loading live data…</strong></div> : !selectedObject ? <div className="status-state"><strong>Select a table or collection</strong><p>Choose an object from the sidebar or reopen one from Command-K.</p></div> : !result?.rows.length ? <div className="status-state"><strong>No records found</strong><p>This object is empty or your filters match no rows.</p></div> : <div className="table-scroll" ref={tableScrollElement} onScroll={(event) => { if (activeExploreTabIdRef.current) exploreScrollPositions.current[activeExploreTabIdRef.current] = { left: event.currentTarget.scrollLeft, top: event.currentTarget.scrollTop }; }}><table role="grid" aria-label={`${selectedObject?.name ?? "Data"} records`} aria-rowcount={visibleRows.length} aria-colcount={visibleColumns.length}><thead><tr>{visibleColumns.map((column) => { const isPinned = pinned.has(column.name); const activeSort = sort[0]?.column === column.name ? sort[0] : undefined; const statusColumn = Boolean(column.enumValues?.length) || /status|state/i.test(column.name); const stickyStyle = isPinned ? ({ "--pin-left": `${pinOffsets[column.name] ?? 0}px` } as CSSProperties) : undefined; return <th className={`${isPinned ? "pinned-column " : ""}${activeSort ? "sorted-column " : ""}${statusColumn ? "status-column" : ""}`} style={stickyStyle} ref={(element) => { if (element) headerCells.current.set(column.name, element); else headerCells.current.delete(column.name); }} key={column.name}><div className="column-header"><button className="column-header-label" onClick={() => toggleSort(column.name)} title={`Sort by ${column.name}`}><span>{column.name}{activeSort && <b>{activeSort.direction === "asc" ? "↑" : "↓"}</b>}</span><small>{column.nativeType}</small></button><div className="column-header-actions"><button className={isPinned ? "active" : ""} onClick={() => togglePin(column.name)} title={isPinned ? `Unpin ${column.name}` : `Pin ${column.name}`} aria-label={isPinned ? `Unpin ${column.name}` : `Pin ${column.name}`}><AppIcon name="pin" size={13} /></button><button className={activeSort ? "active" : ""} onClick={() => toggleSort(column.name)} title={activeSort?.direction === "asc" ? "Sort descending" : activeSort?.direction === "desc" ? "Clear sort" : `Sort ${column.name}`} aria-label={`Sort ${column.name}`}><AppIcon name="sort" size={13} /></button><button onClick={() => hideColumn(column.name)} title={`Hide ${column.name}`} aria-label={`Hide ${column.name}`}><AppIcon name="close" size={13} /></button></div></div></th>; })}</tr></thead><tbody>{visibleRows.map((row, rowIndex) => <tr key={rowIndex}>{visibleColumns.map((column, columnIndex) => { const cell = { row: rowIndex, column: columnIndex }; const selected = gridCellSelected(cell, selectedGridRange); const active = gridActive.row === rowIndex && gridActive.column === columnIndex; const isPinned = pinned.has(column.name); const statusColumn = Boolean(column.enumValues?.length) || /status|state/i.test(column.name); const stickyStyle = isPinned ? ({ "--pin-left": `${pinOffsets[column.name] ?? 0}px` } as CSSProperties) : undefined; const canResolve = (connection.kind === "mongodb" && column.name !== "_id") || (connection.kind === "postgres" && Boolean(column.reference) && row[column.name] !== null && row[column.name] !== undefined); return <td className={`${column.primaryKey ? "mono " : ""}grid-cell${isPinned ? " pinned-column" : ""}${selected ? " grid-selected" : ""}${active ? " grid-active" : ""}${statusColumn ? " status-column" : ""}`} style={stickyStyle} key={column.name} role="gridcell" aria-selected={selected} tabIndex={active ? 0 : -1} data-grid-cell={`${rowIndex}-${columnIndex}`} onClick={(event) => { event.stopPropagation(); selectGridCell(cell, event.shiftKey); }} onDoubleClick={() => openRow(row)} onKeyDown={(event) => handleGridKeyDown(event, rowIndex, columnIndex, row)}><DataValue fieldName={column.name} nativeType={column.nativeType} reference={column.reference} enumValues={column.enumValues} value={row[column.name]} mongo={connection.kind === "mongodb"} postgres={connection.kind === "postgres"} onReference={canResolve ? () => openCellReference(row, column.name, row[column.name], column.reference) : undefined} /></td>; })}</tr>)}</tbody></table></div>}
           {result && <footer className="pagination"><span title={documentCount?.error}>{pageSummary}{filters.length ? ` · ${filters.length} filter${filters.length === 1 ? "" : "s"}` : ""}</span>{visibleRows.length > 0 && <small className="grid-keyboard-hint" title="Arrow keys move the active cell. Shift + arrows extends the selection. ⌘/Ctrl + C copies it. ⌘/Ctrl + Shift + C includes headers.">{selectedGridLabel} selected</small>}<button disabled={!cursors.length} onClick={() => { const previous = cursors.slice(0, -1); setCursors(previous); loadRows(previous.at(-1)); }}>← Previous</button><button disabled={!result.nextCursor} onClick={() => { if (!result.nextCursor) return; setCursors((current) => [...current, result.nextCursor!]); loadRows(result.nextCursor); }}>Next →</button></footer>}
