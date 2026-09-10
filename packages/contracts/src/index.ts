@@ -1,14 +1,20 @@
 import { z } from "zod";
 
-export const databaseKindSchema = z.enum(["postgres", "mysql", "mongodb"]);
+export const databaseKindSchema = z.enum(["postgres", "mysql", "mariadb", "mongodb"]);
 export const connectionEnvironmentSchema = z.enum(["development", "staging", "production"]);
+export const dockerConnectionSourceSchema = z.object({
+  kind: z.literal("docker"), containerId: z.string().min(1), containerName: z.string().min(1),
+  image: z.string().min(1), project: z.string().min(1), service: z.string().min(1).optional(),
+  health: z.enum(["healthy", "unhealthy", "starting", "running"]),
+});
 
 export const databaseConnectionSchema = z.object({
   id: z.string().min(1), name: z.string().min(1), kind: databaseKindSchema,
   environment: connectionEnvironmentSchema, database: z.string().min(1), readOnly: z.boolean(),
   status: z.enum(["healthy", "unavailable", "checking"]), latencyMs: z.number().nonnegative().optional(),
   lastSchemaRefresh: z.string().datetime().optional(), accessLevel: z.enum(["read_only", "read_write"]),
-  demo: z.boolean().optional(), local: z.boolean().optional(),
+  demo: z.boolean().optional(), local: z.boolean().optional(), ephemeral: z.boolean().optional(),
+  source: dockerConnectionSourceSchema.optional(),
 });
 const connectionInputBaseSchema = z.object({
   name: z.string().trim().min(1).max(100), kind: databaseKindSchema,
@@ -16,18 +22,23 @@ const connectionInputBaseSchema = z.object({
   port: z.number().int().min(0).max(65535).default(0), database: z.string().trim().max(128).default(""),
   username: z.string().trim().max(128).default(""), password: z.string().max(4096).default(""),
   tls: z.boolean().default(true), connectionString: z.string().trim().min(1).max(8192).optional(),
+  sslMode: z.enum(["disable", "prefer", "require", "verify-ca", "verify-full"]).optional(),
+  authSource: z.string().trim().max(128).optional(), replicaSet: z.string().trim().max(128).optional(),
+  directConnection: z.boolean().optional(), connectTimeoutMs: z.number().int().min(1_000).max(120_000).optional(),
 });
 export const connectionInputSchema = connectionInputBaseSchema.superRefine((input, context) => {
   if (input.connectionString) {
     let protocol = "";
     let database = "";
     try { const parsed = new URL(input.connectionString); protocol = parsed.protocol; database = decodeURIComponent(parsed.pathname.replace(/^\//, "")); } catch { /* reported below */ }
-    const validProtocol = input.kind === "postgres" ? protocol === "postgres:" || protocol === "postgresql:" : input.kind === "mongodb" ? protocol === "mongodb:" || protocol === "mongodb+srv:" : false;
-    if (!validProtocol) context.addIssue({ code: "custom", path: ["connectionString"], message: input.kind === "postgres" ? "PostgreSQL connection strings must start with postgres:// or postgresql://." : input.kind === "mongodb" ? "MongoDB connection strings must start with mongodb:// or mongodb+srv://." : "Connection strings are not supported for this database." });
-    if (input.kind === "postgres" && !database) context.addIssue({ code: "custom", path: ["connectionString"], message: "The PostgreSQL connection string must include a database name." });
+    const mysqlCompatible = input.kind === "mysql" || input.kind === "mariadb";
+    const validProtocol = input.kind === "postgres" ? protocol === "postgres:" || protocol === "postgresql:" : input.kind === "mongodb" ? protocol === "mongodb:" || protocol === "mongodb+srv:" : mysqlCompatible ? protocol === "mysql:" || protocol === "mariadb:" : false;
+    if (!validProtocol) context.addIssue({ code: "custom", path: ["connectionString"], message: input.kind === "postgres" ? "PostgreSQL connection strings must start with postgres:// or postgresql://." : input.kind === "mongodb" ? "MongoDB connection strings must start with mongodb:// or mongodb+srv://." : `${input.kind === "mariadb" ? "MariaDB" : "MySQL"} connection strings must start with mysql://${input.kind === "mariadb" ? " or mariadb://" : ""}.` });
+    if (input.kind !== "mongodb" && !database) context.addIssue({ code: "custom", path: ["connectionString"], message: "The connection string must include a database name." });
     return;
   }
-  for (const [field, value] of [["host", input.host], ["database", input.database], ["username", input.username], ["password", input.password]] as const) if (!value) context.addIssue({ code: "custom", path: [field], message: `${field.charAt(0).toUpperCase() + field.slice(1)} is required.` });
+  for (const [field, value] of [["host", input.host], ...(input.kind === "mongodb" ? [] : [["database", input.database], ["username", input.username]] as const)] as const) if (!value) context.addIssue({ code: "custom", path: [field], message: `${field.charAt(0).toUpperCase() + field.slice(1)} is required.` });
+  if (input.kind === "mongodb" && Boolean(input.username) !== Boolean(input.password)) context.addIssue({ code: "custom", path: [input.username ? "password" : "username"], message: "MongoDB username and password must be provided together." });
   if (input.port < 1) context.addIssue({ code: "custom", path: ["port"], message: "Port is required." });
 });
 export const connectionUpdateSchema = connectionInputBaseSchema.partial().extend({ password: z.string().min(1).max(4096).optional() });

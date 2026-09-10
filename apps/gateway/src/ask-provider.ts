@@ -95,7 +95,7 @@ export class OpenAICompatibleAskProvider implements AskProvider {
     this.#model = model;
   }
   async generateQuery({ connection, question, schema }: { connection: DatabaseConnection; question: string; schema: SchemaContext[] }, report: AskProviderReporter = async () => undefined): Promise<GeneratedQuery> {
-    const dialect = connection.kind === "mongodb" ? "MongoDB aggregation pipeline JSON array" : connection.kind === "mysql" ? "MySQL SQL" : "PostgreSQL SQL";
+    const dialect = connection.kind === "mongodb" ? "MongoDB aggregation pipeline JSON array" : connection.kind === "mysql" || connection.kind === "mariadb" ? `${connection.kind === "mariadb" ? "MariaDB" : "MySQL"} SQL` : "PostgreSQL SQL";
     const configuredFieldLimit = Number(process.env.ASK_SCHEMA_FIELD_LIMIT ?? 600);
     const schemaText = formatSchemaContext(schema, Number.isFinite(configuredFieldLimit) ? Math.max(50, Math.min(2_000, configuredFieldLimit)) : 600);
     const activityId = "query-generation";

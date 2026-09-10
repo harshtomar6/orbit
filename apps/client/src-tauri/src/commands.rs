@@ -1,4 +1,4 @@
-use crate::{models::*, state::{LocalState, PoolHandle}};
+use crate::{docker_discovery, models::*, state::{LocalState, PoolHandle}};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use chrono::Utc;
 use futures_util::{stream, StreamExt, TryStreamExt};
@@ -19,7 +19,6 @@ const MAX_RESPONSE_BYTES: usize = 2_000_000;
 fn quote(value: &str, marker: char) -> String { format!("{marker}{}{marker}", value.replace(marker, &format!("{marker}{marker}"))) }
 fn decode_cursor(cursor: Option<&str>) -> Result<u64, String> { match cursor { None => Ok(0), Some(value) => { let bytes = URL_SAFE_NO_PAD.decode(value).map_err(|_| "Invalid pagination cursor.".to_string())?; let parsed: Cursor = serde_json::from_slice(&bytes).map_err(|_| "Invalid pagination cursor.".to_string())?; Ok(parsed.offset) } } }
 fn encode_cursor(offset: u64) -> Result<String, String> { Ok(URL_SAFE_NO_PAD.encode(serde_json::to_vec(&Cursor { offset }).map_err(|error| error.to_string())?)) }
-fn record<'a>(records: &'a [ConnectionRecord], id: &str) -> Result<&'a ConnectionRecord, String> { records.iter().find(|item| item.public.id == id).ok_or_else(|| "Local connection not found.".to_string()) }
 fn json_value<T: serde::Serialize>(value: Option<T>) -> Value { value.and_then(|item| serde_json::to_value(item).ok()).unwrap_or(Value::Null) }
 
 fn pg_document(row: &sqlx::postgres::PgRow) -> Result<Map<String, Value>, String> {
@@ -35,20 +34,48 @@ async fn pg_columns(pool: &PgPool, namespace: &str, object: &str) -> Result<Vec<
 async fn mysql_columns(pool: &MySqlPool, namespace: &str, object: &str) -> Result<Vec<DataColumn>, String> { let rows = timeout(QUERY_TIMEOUT, sqlx::query("SELECT COLUMN_NAME name,COLUMN_TYPE native_type,IS_NULLABLE nullable,COLUMN_KEY column_key FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY ORDINAL_POSITION").bind(namespace).bind(object).fetch_all(pool)).await.map_err(|_| "Schema introspection timed out.".to_string())?.map_err(|error| error.to_string())?; Ok(rows.into_iter().map(|row| DataColumn { name: row.get("name"), native_type: row.get("native_type"), nullable: row.get::<String, _>("nullable") == "YES", primary_key: Some(row.get::<String, _>("column_key") == "PRI"), reference: None, enum_values: None }).collect()) }
 
 #[tauri::command]
-pub async fn local_list_connections(state: State<'_, LocalState>) -> Result<Vec<DatabaseConnection>, String> { Ok(state.records.read().await.iter().map(|record| record.public.clone()).collect()) }
+pub async fn local_list_connections(state: State<'_, LocalState>) -> Result<Vec<DatabaseConnection>, String> {
+    state.replace_discovered(docker_discovery::discover().await.unwrap_or_default()).await;
+    Ok(state.all_connections().await)
+}
 
 #[tauri::command]
-pub async fn local_create_connection(input: LocalConnectionInput, state: State<'_, LocalState>) -> Result<DatabaseConnection, String> { let uses_direct_uri = matches!(&input.kind, DatabaseKind::Mongodb | DatabaseKind::Postgres) && input.connection_string.as_deref().is_some_and(|value| !value.trim().is_empty()); if input.name.trim().is_empty() || (!uses_direct_uri && (input.host.trim().is_empty() || input.database.trim().is_empty() || input.username.trim().is_empty() || input.password.is_empty())) { return Err(if uses_direct_uri { "Connection name is required.".into() } else { "All connection fields are required.".into() }); } let uri = LocalState::connection_uri(&input)?; let database_label = LocalState::database_label(&input)?; let started = Instant::now(); let pool = timeout(QUERY_TIMEOUT, LocalState::connect(&input.kind, &uri, &database_label)).await.map_err(|_| "Connection test timed out.".to_string())??; let id = format!("local_{}", Uuid::new_v4()); let secret_ref = format!("secret_{}", Uuid::new_v4()); LocalState::store_secret(&secret_ref, &uri)?; let public = DatabaseConnection { id: id.clone(), name: input.name, kind: input.kind, environment: input.environment, database: database_label, read_only: true, status: "healthy".into(), latency_ms: Some(started.elapsed().as_millis() as u64), last_schema_refresh: None, access_level: "read_only".into(), local: true }; state.records.write().await.push(ConnectionRecord { public: public.clone(), secret_ref }); state.pools.write().await.insert(id, pool); if let Err(error) = state.persist().await { state.records.write().await.retain(|record| record.public.id != public.id); return Err(error); } Ok(public) }
+pub async fn local_scan_docker_connections(state: State<'_, LocalState>) -> Result<Vec<DatabaseConnection>, String> {
+    let discovered = docker_discovery::discover().await?;
+    state.replace_discovered(discovered).await;
+    Ok(state.all_connections().await)
+}
+
+#[tauri::command]
+pub async fn local_create_connection(input: LocalConnectionInput, state: State<'_, LocalState>) -> Result<DatabaseConnection, String> { let uses_direct_uri = input.connection_string.as_deref().is_some_and(|value| !value.trim().is_empty()); let missing_structured_fields = input.host.trim().is_empty() || input.port == 0 || (!matches!(&input.kind, DatabaseKind::Mongodb) && (input.database.trim().is_empty() || input.username.trim().is_empty())); if input.name.trim().is_empty() || (!uses_direct_uri && missing_structured_fields) { return Err(if input.name.trim().is_empty() { "Connection name is required.".into() } else { "Host, port, database, and username are required for this database.".into() }); } if matches!(&input.kind, DatabaseKind::Mongodb) && (input.username.trim().is_empty() != input.password.is_empty()) { return Err("MongoDB username and password must be provided together.".into()); } let uri = LocalState::connection_uri(&input)?; let database_label = LocalState::database_label(&input)?; let started = Instant::now(); let connect_timeout = LocalState::connection_timeout(&uri).saturating_add(Duration::from_secs(1)); let pool = timeout(connect_timeout, LocalState::connect(&input.kind, &uri, &database_label)).await.map_err(|_| "Connection test timed out.".to_string())??; let id = format!("local_{}", Uuid::new_v4()); let secret_ref = format!("secret_{}", Uuid::new_v4()); LocalState::store_secret(&secret_ref, &uri)?; let public = DatabaseConnection { id: id.clone(), name: input.name, kind: input.kind, environment: input.environment, database: database_label, read_only: true, status: "healthy".into(), latency_ms: Some(started.elapsed().as_millis() as u64), last_schema_refresh: None, access_level: "read_only".into(), local: true, ephemeral: None, source: None }; state.records.write().await.push(ConnectionRecord { public: public.clone(), secret_ref }); state.pools.write().await.insert(id, pool); if let Err(error) = state.persist().await { state.records.write().await.retain(|record| record.public.id != public.id); return Err(error); } Ok(public) }
+
+#[tauri::command]
+pub async fn local_pin_connection(id: String, state: State<'_, LocalState>) -> Result<DatabaseConnection, String> {
+    let discovered = state.discovered.read().await.get(&id).cloned().ok_or_else(|| "The Docker connection is no longer running.".to_string())?;
+    let new_id = format!("local_{}", Uuid::new_v4());
+    let secret_ref = format!("secret_{}", Uuid::new_v4());
+    LocalState::store_secret(&secret_ref, &discovered.uri)?;
+    let mut public = discovered.public;
+    public.id = new_id.clone();
+    public.ephemeral = None;
+    state.records.write().await.push(ConnectionRecord { public: public.clone(), secret_ref: secret_ref.clone() });
+    if let Err(error) = state.persist().await {
+        state.records.write().await.retain(|record| record.public.id != new_id);
+        let _ = LocalState::delete_secret(&secret_ref);
+        return Err(error);
+    }
+    Ok(public)
+}
 
 #[derive(Deserialize)] #[serde(rename_all = "camelCase")] pub struct LocalConnectionPatch { pub name: Option<String>, pub environment: Option<String> }
 #[tauri::command]
 pub async fn local_update_connection(id: String, input: LocalConnectionPatch, state: State<'_, LocalState>) -> Result<DatabaseConnection, String> { let updated = { let mut records = state.records.write().await; let item = records.iter_mut().find(|record| record.public.id == id).ok_or_else(|| "Local connection not found.".to_string())?; if let Some(name) = input.name { if name.trim().is_empty() { return Err("Connection name cannot be empty.".into()); } item.public.name = name; } if let Some(environment) = input.environment { item.public.environment = environment; } item.public.clone() }; state.persist().await?; Ok(updated) }
 
 #[tauri::command]
-pub async fn local_remove_connection(id: String, state: State<'_, LocalState>) -> Result<bool, String> { state.close_pool(&id).await; let secret = { let mut records = state.records.write().await; let index = records.iter().position(|record| record.public.id == id).ok_or_else(|| "Local connection not found.".to_string())?; records.remove(index).secret_ref }; LocalState::delete_secret(&secret)?; state.persist().await?; Ok(true) }
+pub async fn local_remove_connection(id: String, state: State<'_, LocalState>) -> Result<bool, String> { state.close_pool(&id).await; let removed = { let mut records = state.records.write().await; let index = records.iter().position(|record| record.public.id == id).ok_or_else(|| "Local connection not found.".to_string())?; records.remove(index) }; if let Err(error) = state.persist().await { state.records.write().await.push(removed); return Err(error); } let _ = LocalState::delete_secret(&removed.secret_ref); Ok(true) }
 
 #[tauri::command]
-pub async fn local_test_connection(id: String, state: State<'_, LocalState>) -> Result<HealthResult, String> { let item = { let records = state.records.read().await; record(&records, &id)?.clone() }; state.close_pool(&id).await; let started = Instant::now(); let pool = state.pool_for(&item).await?; match pool { PoolHandle::Postgres(pool) => { timeout(QUERY_TIMEOUT, sqlx::query("SELECT 1").execute(&pool)).await.map_err(|_| "Connection test timed out.".to_string())?.map_err(|error| error.to_string())?; }, PoolHandle::Mysql(pool) => { timeout(QUERY_TIMEOUT, sqlx::query("SELECT 1").execute(&pool)).await.map_err(|_| "Connection test timed out.".to_string())?.map_err(|error| error.to_string())?; }, PoolHandle::Mongodb(client) => { timeout(QUERY_TIMEOUT, client.database("admin").run_command(doc! { "ping": 1 })).await.map_err(|_| "Connection test timed out.".to_string())?.map_err(|error| error.to_string())?; } } let latency = started.elapsed().as_millis() as u64; { let mut records = state.records.write().await; if let Some(record) = records.iter_mut().find(|record| record.public.id == id) { record.public.status = "healthy".into(); record.public.latency_ms = Some(latency); } } state.persist().await?; Ok(HealthResult { status: "healthy".into(), latency_ms: latency }) }
+pub async fn local_test_connection(id: String, state: State<'_, LocalState>) -> Result<HealthResult, String> { let item = state.connection_record(&id).await?; state.close_pool(&id).await; let started = Instant::now(); let pool = state.pool_for(&item).await?; match pool { PoolHandle::Postgres(pool) => { timeout(QUERY_TIMEOUT, sqlx::query("SELECT 1").execute(&pool)).await.map_err(|_| "Connection test timed out.".to_string())?.map_err(|error| error.to_string())?; }, PoolHandle::Mysql(pool) => { timeout(QUERY_TIMEOUT, sqlx::query("SELECT 1").execute(&pool)).await.map_err(|_| "Connection test timed out.".to_string())?.map_err(|error| error.to_string())?; }, PoolHandle::Mongodb(client) => { timeout(QUERY_TIMEOUT, client.database("admin").run_command(doc! { "ping": 1 })).await.map_err(|_| "Connection test timed out.".to_string())?.map_err(|error| error.to_string())?; } } let latency = started.elapsed().as_millis() as u64; { let mut records = state.records.write().await; if let Some(record) = records.iter_mut().find(|record| record.public.id == id) { record.public.status = "healthy".into(); record.public.latency_ms = Some(latency); } } state.persist().await?; Ok(HealthResult { status: "healthy".into(), latency_ms: latency }) }
 
 fn is_mongo_system_namespace(namespace: &str) -> bool { matches!(namespace.to_ascii_lowercase().as_str(), "admin" | "config" | "local") }
 fn is_mongo_system_collection(collection: &str) -> bool { collection.to_ascii_lowercase().starts_with("system.") }
@@ -86,11 +113,11 @@ pub async fn list_objects_for(record: &ConnectionRecord, pool: PoolHandle) -> Re
 }
 
 #[tauri::command]
-pub async fn local_list_objects(id: String, state: State<'_, LocalState>) -> Result<ObjectListResult, String> { let item = { let records = state.records.read().await; record(&records, &id)?.clone() }; let (objects, namespaces) = list_objects_for(&item, state.pool_for(&item).await?).await?; let refreshed_at = Utc::now().to_rfc3339(); { let mut records = state.records.write().await; if let Some(record) = records.iter_mut().find(|record| record.public.id == id) { record.public.last_schema_refresh = Some(refreshed_at.clone()); } } state.persist().await?; Ok(ObjectListResult { objects, namespaces, refreshed_at }) }
+pub async fn local_list_objects(id: String, state: State<'_, LocalState>) -> Result<ObjectListResult, String> { let item = state.connection_record(&id).await?; let (objects, namespaces) = list_objects_for(&item, state.pool_for(&item).await?).await?; let refreshed_at = Utc::now().to_rfc3339(); { let mut records = state.records.write().await; if let Some(record) = records.iter_mut().find(|record| record.public.id == id) { record.public.last_schema_refresh = Some(refreshed_at.clone()); } } state.persist().await?; Ok(ObjectListResult { objects, namespaces, refreshed_at }) }
 
 #[tauri::command]
 pub async fn local_list_namespace_objects(id: String, namespace: String, state: State<'_, LocalState>) -> Result<ObjectListResult, String> {
-    let item = { let records = state.records.read().await; record(&records, &id)?.clone() };
+    let item = state.connection_record(&id).await?;
     if !matches!(item.public.kind, DatabaseKind::Mongodb) { return Err("Lazy database expansion is only available for MongoDB connections.".into()); }
     let PoolHandle::Mongodb(client) = state.pool_for(&item).await? else { return Err("MongoDB connection is unavailable.".into()); };
     let objects = mongo_collection_objects(&id, &client, &namespace).await?;
@@ -98,7 +125,7 @@ pub async fn local_list_namespace_objects(id: String, namespace: String, state: 
 }
 
 #[tauri::command]
-pub async fn local_explore(request: ExploreRequest, state: State<'_, LocalState>) -> Result<ExploreResult, String> { if request.limit == 0 || request.limit > 200 { return Err("Local Explore limit must be between 1 and 200.".into()); } let item = { let records = state.records.read().await; record(&records, &request.connection_id)?.clone() }; let pool = state.pool_for(&item).await?; let offset = decode_cursor(request.cursor.as_deref())?; let started = Instant::now(); let mut result = match pool { PoolHandle::Postgres(pool) => explore_pg(&pool, &request, offset).await?, PoolHandle::Mysql(pool) => explore_mysql(&pool, &request, offset).await?, PoolHandle::Mongodb(client) => explore_mongo(&client, &request.namespace, &request, offset).await? }; result.duration_ms = started.elapsed().as_millis() as u64; if serde_json::to_vec(&result.rows).map_err(|error| error.to_string())?.len() > MAX_RESPONSE_BYTES { return Err("Local query response exceeded 2 MB.".into()); } Ok(result) }
+pub async fn local_explore(request: ExploreRequest, state: State<'_, LocalState>) -> Result<ExploreResult, String> { if request.limit == 0 || request.limit > 200 { return Err("Local Explore limit must be between 1 and 200.".into()); } let item = state.connection_record(&request.connection_id).await?; let pool = state.pool_for(&item).await?; let offset = decode_cursor(request.cursor.as_deref())?; let started = Instant::now(); let mut result = match pool { PoolHandle::Postgres(pool) => explore_pg(&pool, &request, offset).await?, PoolHandle::Mysql(pool) => explore_mysql(&pool, &request, offset).await?, PoolHandle::Mongodb(client) => explore_mongo(&client, &request.namespace, &request, offset).await? }; result.duration_ms = started.elapsed().as_millis() as u64; if serde_json::to_vec(&result.rows).map_err(|error| error.to_string())?.len() > MAX_RESPONSE_BYTES { return Err("Local query response exceeded 2 MB.".into()); } Ok(result) }
 
 fn mongo_filter(filters: Option<&[ExploreFilter]>) -> Result<Document, String> {
     let mut clauses = Vec::new();
@@ -129,7 +156,7 @@ fn mongo_filter(filters: Option<&[ExploreFilter]>) -> Result<Document, String> {
 
 #[tauri::command]
 pub async fn local_count_documents(request: DocumentCountRequest, state: State<'_, LocalState>) -> Result<DocumentCountResult, String> {
-    let item = { let records = state.records.read().await; record(&records, &request.connection_id)?.clone() };
+    let item = state.connection_record(&request.connection_id).await?;
     if !matches!(item.public.kind, DatabaseKind::Mongodb) { return Err("Document counts are only available for MongoDB connections.".into()); }
     let PoolHandle::Mongodb(client) = state.pool_for(&item).await? else { return Err("MongoDB connection is unavailable.".into()); };
     let started = Instant::now();
@@ -186,7 +213,7 @@ async fn resolve_pg_foreign_key(pool: &PgPool, request: &ReferenceLookupRequest,
 
 #[tauri::command]
 pub async fn local_resolve_reference(request: ReferenceLookupRequest, state: State<'_, LocalState>) -> Result<ReferenceLookupResult, String> {
-    let item = { let records = state.records.read().await; record(&records, &request.connection_id)?.clone() };
+    let item = state.connection_record(&request.connection_id).await?;
     if matches!(&item.public.kind, DatabaseKind::Postgres) {
         let reference = request.reference.as_ref().ok_or_else(|| "PostgreSQL foreign-key metadata is missing. Refresh the schema and try again.".to_string())?;
         let PoolHandle::Postgres(pool) = state.pool_for(&item).await? else { return Err("PostgreSQL connection is unavailable.".into()); };

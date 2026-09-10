@@ -16,7 +16,9 @@ import type { DatabaseTransportMode } from "./runtime";
 
 export interface DatabaseApi {
   connections(): Promise<DatabaseConnection[]>;
+  scanDockerConnections?(): Promise<DatabaseConnection[]>;
   createConnection(input: ConnectionInput): Promise<DatabaseConnection>;
+  pinConnection?(id: string): Promise<DatabaseConnection>;
   updateConnection(id: string, input: ConnectionUpdate): Promise<DatabaseConnection>;
   removeConnection(id: string): Promise<{ removed: true }>;
   objects(connectionId: string): Promise<ObjectListResult>;
@@ -30,9 +32,11 @@ export interface DatabaseApi {
 
 const localApi: DatabaseApi = {
   connections: () => invoke("local_list_connections"),
+  scanDockerConnections: () => invoke("local_scan_docker_connections"),
   createConnection: (input) => invoke("local_create_connection", { input }),
+  pinConnection: (id) => invoke("local_pin_connection", { id }),
   updateConnection: (id, input) => invoke("local_update_connection", { id, input }),
-  removeConnection: (id) => invoke("local_remove_connection", { id }),
+  removeConnection: async (id) => { await invoke<boolean>("local_remove_connection", { id }); return { removed: true }; },
   objects: (id) => invoke("local_list_objects", { id }),
   objectsInNamespace: (id, namespace) => invoke("local_list_namespace_objects", { id, namespace }),
   refreshSchema: (id) => invoke("local_list_objects", { id }),

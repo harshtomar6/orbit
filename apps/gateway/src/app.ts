@@ -11,7 +11,7 @@ import { MemoryViewStore, type ViewStore } from "./view-store.js";
 const limits = { timeoutMs: Number(process.env.QUERY_TIMEOUT_MS ?? 10_000), maxResponseBytes: Number(process.env.MAX_RESPONSE_BYTES ?? 2_000_000) };
 const discoveryLimits = { ...limits, timeoutMs: Number(process.env.SCHEMA_TIMEOUT_MS ?? 30_000) };
 const demoRecord: ConnectionRecord = { public: { id: "demo_postgres", name: "Orbit sample", kind: "postgres", environment: "development", database: "orbit_sample", readOnly: true, accessLevel: "read_only", status: "healthy", latencyMs: 1, demo: true }, secretRef: "demo://built-in" };
-const registry = new AdapterRegistry().register("postgres", createPostgresAdapter).register("mysql", createMySqlAdapter).register("mongodb", createMongoAdapter);
+const registry = new AdapterRegistry().register("postgres", createPostgresAdapter).register("mysql", createMySqlAdapter).register("mariadb", createMySqlAdapter).register("mongodb", createMongoAdapter);
 async function mapConcurrent<T, U>(items: T[], concurrency: number, task: (item: T) => Promise<U>): Promise<U[]> {
   const results = new Array<U>(items.length); let cursor = 0;
   await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => { while (cursor < items.length) { const index = cursor; cursor += 1; results[index] = await task(items[index]!); } }));

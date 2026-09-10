@@ -47,7 +47,8 @@ function sqlWhere(filters: ExploreFilter[] | undefined, start: number, dialect: 
 }
 
 export async function createPostgresAdapter(connection: DatabaseConnection, connectionUri: string): Promise<DatabaseAdapter> {
-  const pool = new PgPool({ connectionString: connectionUri, max: 5, idleTimeoutMillis: 30_000, connectionTimeoutMillis: 5_000, application_name: "orbit-gateway" });
+  const configuredTimeout = Number(new URL(connectionUri).searchParams.get("connect_timeout")) * 1_000;
+  const pool = new PgPool({ connectionString: connectionUri, max: 5, idleTimeoutMillis: 30_000, connectionTimeoutMillis: Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? configuredTimeout : 5_000, application_name: "orbit-gateway" });
   const describe = async (namespace: string, name: string, options: QueryOptions) => { const result = await timed(pool.query<{ name: string; native_type: string; nullable: boolean; primary_key: boolean; reference_namespace: string | null; reference_object: string | null; reference_column: string | null; enum_values: string[] | null }>(`SELECT a.attname name, pg_catalog.format_type(a.atttypid,a.atttypmod) native_type, NOT a.attnotnull nullable, EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid=a.attrelid AND i.indisprimary AND a.attnum=ANY(i.indkey)) primary_key, fk.reference_namespace, fk.reference_object, fk.reference_column, (SELECT jsonb_agg(e.enumlabel ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid=a.atttypid) enum_values FROM pg_attribute a JOIN pg_class c ON c.oid=a.attrelid JOIN pg_namespace n ON n.oid=c.relnamespace LEFT JOIN LATERAL (SELECT rn.nspname reference_namespace,rc.relname reference_object,ra.attname reference_column FROM pg_constraint con JOIN LATERAL generate_subscripts(con.conkey,1) pos(i) ON true JOIN pg_class rc ON rc.oid=con.confrelid JOIN pg_namespace rn ON rn.oid=rc.relnamespace JOIN pg_attribute ra ON ra.attrelid=con.confrelid AND ra.attnum=con.confkey[pos.i] WHERE con.conrelid=a.attrelid AND con.contype='f' AND con.conkey[pos.i]=a.attnum ORDER BY con.oid LIMIT 1) fk ON true WHERE n.nspname=$1 AND c.relname=$2 AND a.attnum>0 AND NOT a.attisdropped ORDER BY a.attnum`, [namespace, name]), options); return result.rows.map((row): DataColumn => ({ name: row.name, nativeType: row.native_type, nullable: row.nullable, ...(row.primary_key ? { primaryKey: true } : {}), ...(row.reference_namespace && row.reference_object && row.reference_column ? { reference: { namespace: row.reference_namespace, object: row.reference_object, column: row.reference_column } } : {}), ...(row.enum_values?.length ? { enumValues: row.enum_values } : {}) })); };
   return {
     kind: "postgres",
@@ -84,11 +85,19 @@ export async function createPostgresAdapter(connection: DatabaseConnection, conn
 }
 
 export async function createMySqlAdapter(connection: DatabaseConnection, connectionUri: string): Promise<DatabaseAdapter> {
-  const pool: MySqlPool = mysql.createPool({ uri: connectionUri, connectionLimit: 5, maxIdle: 5, idleTimeout: 30_000, enableKeepAlive: true });
+  const parsed = new URL(connectionUri);
+  const sslMode = parsed.searchParams.get("ssl-mode")?.toUpperCase();
+  const legacySsl = parsed.searchParams.get("ssl");
+  const configuredTimeout = Number(parsed.searchParams.get("connect_timeout")) * 1_000;
+  parsed.searchParams.delete("ssl-mode");
+  parsed.searchParams.delete("connect_timeout");
+  if (legacySsl === "true" || legacySsl === "false") parsed.searchParams.delete("ssl");
+  const ssl = sslMode === "DISABLED" || legacySsl === "false" ? undefined : sslMode || legacySsl === "true" ? { rejectUnauthorized: sslMode === "VERIFY_CA" || sslMode === "VERIFY_IDENTITY" } : undefined;
+  const pool: MySqlPool = mysql.createPool({ uri: parsed.toString(), connectionLimit: 5, maxIdle: 5, idleTimeout: 30_000, enableKeepAlive: true, ...(ssl === undefined ? {} : { ssl }), ...(Number.isFinite(configuredTimeout) && configuredTimeout > 0 ? { connectTimeout: configuredTimeout } : {}) });
   const db = connection.database;
   const describe = async (namespace: string, name: string, options: QueryOptions) => { const [rows] = await timed(pool.query<RowDataPacket[]>(`SELECT COLUMN_NAME name,COLUMN_TYPE nativeType,IS_NULLABLE nullable,COLUMN_KEY columnKey FROM information_schema.COLUMNS WHERE TABLE_SCHEMA=? AND TABLE_NAME=? ORDER BY ORDINAL_POSITION`, [namespace, name]), options); return rows.map((row): DataColumn => ({ name: String(row.name), nativeType: String(row.nativeType), nullable: row.nullable === "YES", ...(row.columnKey === "PRI" ? { primaryKey: true } : {}) })); };
   return {
-    kind: "mysql",
+    kind: connection.kind === "mariadb" ? "mariadb" : "mysql",
     async testConnection(options) { const start = performance.now(); await timed(pool.query("SELECT 1"), options); return { latencyMs: Math.round(performance.now() - start) }; },
     async listObjects(connectionId, options) { const [rows] = await timed(pool.query<RowDataPacket[]>(`SELECT TABLE_SCHEMA namespace,TABLE_NAME name,CASE TABLE_TYPE WHEN 'VIEW' THEN 'view' ELSE 'table' END kind,TABLE_ROWS estimatedRows FROM information_schema.TABLES WHERE TABLE_SCHEMA=? ORDER BY TABLE_NAME`, [db]), options); return rows.map((row): DataObject => ({ connectionId, namespace: String(row.namespace), name: String(row.name), kind: row.kind === "view" ? "view" : "table", ...(row.estimatedRows === null ? {} : { estimatedRows: Number(row.estimatedRows) }) })); },
     describeObject: describe,

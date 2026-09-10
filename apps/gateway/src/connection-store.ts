@@ -17,17 +17,21 @@ const encryptedSchema = z.object({ iv: z.string(), tag: z.string(), ciphertext: 
 type StoredSecret = z.infer<typeof encryptedSchema>;
 
 function uriFor(input: ConnectionInput): string {
-  if (input.connectionString && (input.kind === "postgres" || input.kind === "mongodb")) return input.connectionString.trim();
-  const auth = `${encodeURIComponent(input.username)}:${encodeURIComponent(input.password)}`;
+  if (input.connectionString) return input.kind === "mariadb" ? input.connectionString.trim().replace(/^mariadb:/, "mysql:") : input.connectionString.trim();
+  const auth = input.username ? `${encodeURIComponent(input.username)}:${encodeURIComponent(input.password)}@` : "";
   const host = input.host.includes(":") && !input.host.startsWith("[") ? `[${input.host}]` : input.host;
-  if (input.kind === "postgres") return `postgresql://${auth}@${host}:${input.port}/${encodeURIComponent(input.database)}?sslmode=${input.tls ? "require" : "disable"}`;
-  if (input.kind === "mysql") return `mysql://${auth}@${host}:${input.port}/${encodeURIComponent(input.database)}${input.tls ? "?ssl=true" : ""}`;
-  return `mongodb://${auth}@${host}:${input.port}/${encodeURIComponent(input.database)}${input.tls ? "?tls=true" : ""}`;
+  const timeout = input.connectTimeoutMs ? input.kind === "mongodb" ? `&connectTimeoutMS=${input.connectTimeoutMs}` : `&connect_timeout=${Math.max(1, Math.round(input.connectTimeoutMs / 1_000))}` : "";
+  if (input.kind === "postgres") return `postgresql://${auth}${host}:${input.port}/${encodeURIComponent(input.database)}?sslmode=${input.sslMode ?? (input.tls ? "require" : "disable")}${timeout}`;
+  if (input.kind === "mysql" || input.kind === "mariadb") { const sslMode = { disable: "DISABLED", prefer: "PREFERRED", require: "REQUIRED", "verify-ca": "VERIFY_CA", "verify-full": "VERIFY_IDENTITY" }[input.sslMode ?? (input.tls ? "require" : "disable")]; return `mysql://${auth}${host}:${input.port}/${encodeURIComponent(input.database)}?ssl-mode=${sslMode}${timeout}`; }
+  const mongoAuth = input.authSource ? `&authSource=${encodeURIComponent(input.authSource)}` : "";
+  const replicaSet = input.replicaSet ? `&replicaSet=${encodeURIComponent(input.replicaSet)}` : "";
+  const direct = input.directConnection === undefined ? "" : `&directConnection=${input.directConnection}`;
+  return `mongodb://${auth}${host}:${input.port}/${encodeURIComponent(input.database)}?tls=${input.tls}${mongoAuth}${replicaSet}${direct}${timeout}`;
 }
 
 function databaseFor(input: ConnectionInput): string {
-  if (input.kind === "mongodb" && input.connectionString) return "All databases";
-  if (input.kind === "postgres" && input.connectionString) return decodeURIComponent(new URL(input.connectionString).pathname.replace(/^\//, ""));
+  if (input.kind === "mongodb") return "All databases";
+  if (input.connectionString) return decodeURIComponent(new URL(input.connectionString).pathname.replace(/^\//, ""));
   return input.database;
 }
 
@@ -53,7 +57,7 @@ export class FileConnectionStore implements ConnectionStore {
   async list() { return [...this.#records.values()]; } async get(id: string) { return this.#records.get(id); }
   async create(input: ConnectionInput) { const id = `conn_${randomUUID()}`; const secretRef = `secret_${randomUUID()}`; const record: ConnectionRecord = { public: { id, name: input.name, kind: input.kind, environment: input.environment, database: databaseFor(input), readOnly: true, accessLevel: "read_only", status: "checking" }, secretRef }; this.#records.set(id, record); this.#secrets.set(secretRef, this.encrypt(uriFor(input))); await this.persist(); return record; }
   async update(id: string, input: ConnectionUpdate) { const current = this.#records.get(id); if (!current) return undefined; const publicConnection = databaseConnectionSchema.parse({ ...current.public, name: input.name ?? current.public.name, kind: input.kind ?? current.public.kind, environment: input.environment ?? current.public.environment, database: input.database ?? current.public.database, status: "checking" }); const record = { public: publicConnection, secretRef: current.secretRef }; this.#records.set(id, record); if (input.password) { const parsed = new URL(await this.resolveSecret(current.secretRef)); const tlsFromUri = parsed.searchParams.get("sslmode") !== "disable" || parsed.searchParams.get("tls") === "true" || parsed.searchParams.get("ssl") === "true"; const complete: ConnectionInput = { name: publicConnection.name, kind: input.kind ?? current.public.kind, environment: publicConnection.environment, host: input.host ?? parsed.hostname, port: input.port ?? Number(parsed.port), database: publicConnection.database, username: input.username ?? decodeURIComponent(parsed.username), password: input.password, tls: input.tls ?? tlsFromUri }; this.#secrets.set(current.secretRef, this.encrypt(uriFor(complete))); } await this.persist(); return record; }
-  async remove(id: string) { const record = this.#records.get(id); if (!record) return false; this.#records.delete(id); this.#secrets.delete(record.secretRef); await this.persist(); return true; }
+  async remove(id: string) { const record = this.#records.get(id); if (!record) return false; const secret = this.#secrets.get(record.secretRef); this.#records.delete(id); this.#secrets.delete(record.secretRef); try { await this.persist(); } catch (error) { this.#records.set(id, record); if (secret) this.#secrets.set(record.secretRef, secret); throw error; } return true; }
   async updatePublic(id: string, patch: Partial<DatabaseConnection>) { const record = this.#records.get(id); if (!record) return; this.#records.set(id, { ...record, public: databaseConnectionSchema.parse({ ...record.public, ...patch }) }); await this.persist(); }
   async resolveSecret(secretRef: string) { const value = this.#secrets.get(secretRef); if (!value) throw new Error("Connection secret is unavailable."); return this.decrypt(value); }
 }

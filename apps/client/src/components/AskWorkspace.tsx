@@ -34,7 +34,7 @@ export function AskWorkspace({ connection, context, question, state, trace, erro
 }) {
   const [copied, setCopied] = useState(false);
   const active = state !== "idle" || Boolean(draft) || Boolean(error);
-  const language = draft?.queryLanguage === "mongodb" ? "MongoDB pipeline" : connection?.kind === "mysql" ? "MySQL" : "PostgreSQL";
+  const language = draft?.queryLanguage === "mongodb" ? "MongoDB pipeline" : connection?.kind === "mysql" ? "MySQL" : connection?.kind === "mariadb" ? "MariaDB" : "PostgreSQL";
   const traceSteps = trace.filter((event) => event.type !== "output");
   const latestStep = traceSteps.at(-1);
   const outputByActivity = new Map<string, string>();

@@ -3,15 +3,65 @@ use serde_json::Value;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum DatabaseKind { Postgres, Mysql, Mongodb }
+pub enum DatabaseKind { Postgres, Mysql, Mariadb, Mongodb }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct LocalConnectionInput { pub name: String, pub kind: DatabaseKind, pub environment: String, pub host: String, pub port: u16, pub database: String, pub username: String, pub password: String, pub tls: bool, pub connection_string: Option<String> }
+pub struct LocalConnectionInput {
+    pub name: String,
+    pub kind: DatabaseKind,
+    pub environment: String,
+    pub host: String,
+    pub port: u16,
+    pub database: String,
+    pub username: String,
+    pub password: String,
+    pub tls: bool,
+    pub connection_string: Option<String>,
+    #[serde(default)]
+    pub ssl_mode: Option<String>,
+    #[serde(default)]
+    pub auth_source: Option<String>,
+    #[serde(default)]
+    pub replica_set: Option<String>,
+    #[serde(default)]
+    pub direct_connection: Option<bool>,
+    #[serde(default)]
+    pub connect_timeout_ms: Option<u64>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DatabaseConnection { pub id: String, pub name: String, pub kind: DatabaseKind, pub environment: String, pub database: String, pub read_only: bool, pub status: String, pub latency_ms: Option<u64>, pub last_schema_refresh: Option<String>, pub access_level: String, pub local: bool }
+pub struct DockerConnectionSource {
+    pub kind: String,
+    pub container_id: String,
+    pub container_name: String,
+    pub image: String,
+    pub project: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    pub health: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseConnection {
+    pub id: String,
+    pub name: String,
+    pub kind: DatabaseKind,
+    pub environment: String,
+    pub database: String,
+    pub read_only: bool,
+    pub status: String,
+    pub latency_ms: Option<u64>,
+    pub last_schema_refresh: Option<String>,
+    pub access_level: String,
+    pub local: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ephemeral: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<DockerConnectionSource>,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -1,4 +1,5 @@
 mod commands;
+mod docker_discovery;
 mod models;
 mod state;
 
@@ -21,7 +22,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             platform_name,
             commands::local_list_connections,
+            commands::local_scan_docker_connections,
             commands::local_create_connection,
+            commands::local_pin_connection,
             commands::local_update_connection,
             commands::local_remove_connection,
             commands::local_test_connection,
