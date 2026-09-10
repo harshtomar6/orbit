@@ -2,7 +2,7 @@
 
 **An AI-native database client for exploring data, asking complex questions, and turning answers into reusable dashboards.**
 
-Orbit brings direct database exploration, an AI data agent, and lightweight business intelligence into one cross-platform workspace. Connect MongoDB, PostgreSQL, or MySQL; navigate data manually with developer-friendly controls; ask questions in natural language; inspect and run the generated queries; visualize the results; and save useful charts as dashboards.
+Orbit brings direct database exploration, an AI data agent, and lightweight business intelligence into one cross-platform workspace. Connect MongoDB, PostgreSQL, MySQL, or MariaDB; navigate data manually with developer-friendly controls; ask questions in natural language; inspect and run the generated queries; visualize the results; and save useful charts as dashboards.
 
 The desktop app is available for macOS, Windows, and Linux. A mobile experience is planned so you can securely interact with your data away from your desk.
 
@@ -26,12 +26,27 @@ You can start with a collection or table, move through it entirely from the keyb
 
 Orbit is designed for people who work close to production data:
 
-- **Developers** debugging application state, inspecting relationships, and validating migrations or integrations.
+- **Developers** debugging application state, inspecting relationships, validating migrations or integrations, and exploring databases created by coding agents.
 - **Founders and operators** answering product and business questions without waiting for a separate analytics workflow.
 - **Data and product teams** exploring unfamiliar datasets, testing hypotheses, and sharing lightweight views.
 - **Small teams** that want database exploration and operational dashboards without maintaining a full BI stack.
 
 Orbit is especially useful when the question starts simple but the investigation does not.
+
+## From local database to useful data, without setup friction
+
+Modern development workflows create databases dynamically. A coding agent may start PostgreSQL in Docker, a Compose stack may expose MongoDB on a random host port, or a project may include several MySQL-compatible services. Orbit is designed to make those databases immediately visible and useful.
+
+In the desktop app, Orbit automatically discovers supported database containers that publish a port to the host:
+
+- PostgreSQL, MongoDB, MySQL, and MariaDB containers appear as temporary connections.
+- Related containers are grouped by Docker Compose project, so local stacks stay understandable.
+- Discovered connections follow the container lifecycle and disappear when the service stops.
+- Choose **Pin** to turn a discovered service into a saved connection whose credential is stored in the operating system vault.
+
+You can also add a connection yourself. A connection string is the default and fastest path; **Host & credentials** exposes the individual hostname, port, username, password, and database fields when you need more control. Engine-specific advanced options include SSL/TLS behavior, connection timeout, and MongoDB authentication source, replica set, and direct-connection settings.
+
+This makes Orbit a natural companion to coding agents: let the agent create or seed the database, then open Orbit to inspect the resulting data with the keyboard, follow relationships, run filters, or ask the AI data agent a higher-level question.
 
 ## Explore data your way
 
@@ -80,10 +95,11 @@ For day-to-day operational questions, this closes the gap between a database cli
 
 ## What is implemented
 
-- MongoDB, PostgreSQL, and MySQL connections.
+- MongoDB, PostgreSQL, MySQL, and MariaDB connections using either a connection string or individual host and credential fields.
 - Native desktop connectivity through SQLx and the official MongoDB Rust driver.
 - Web and remote access through an HTTPS gateway that never exposes database credentials to the browser.
 - Connection testing, health, latency, encrypted gateway credential storage, and operating-system credential-vault storage on desktop.
+- Automatic desktop discovery of running Docker database containers, grouped by Compose project, with an explicit path to pin temporary connections.
 - Lazy and cached database/schema/collection discovery with explicit refresh controls.
 - Multi-tab table and collection exploration without refetching when switching between cached tabs.
 - Typed filters, sorting, pagination, loaded-row search, column controls, CSV/JSON export, and document counts.
@@ -119,7 +135,7 @@ Ask, Views, sharing, the web app, and future mobile clients use the gateway. The
 - `apps/client/src-tauri` — Tauri 2 desktop wrapper and native Rust command boundary.
 - `apps/gateway` — HTTPS query gateway for AI, Views, sharing, web, and future mobile clients.
 - `packages/contracts` — shared request, response, and database metadata types.
-- `packages/database` — adapter interfaces and implementations for PostgreSQL, MySQL, and MongoDB.
+- `packages/database` — adapter interfaces and implementations for PostgreSQL, MySQL/MariaDB, and MongoDB.
 - `packages/theme` — shared design tokens.
 
 ## Getting started
@@ -146,9 +162,13 @@ pnpm desktop:dev
 
 Desktop Explore automatically uses the local native transport. Ask and Views use the gateway, so those features require the gateway to be running and configured.
 
+With Docker running, Orbit also scans for supported database containers whose ports are published to the host. Detection is read-only and inferred connection details remain in memory unless you explicitly pin a connection.
+
 ## Configuring database connections
 
 Open the connection switcher and choose **Add or manage connections**. New connections are tested before they are saved.
+
+Choose **Connection string** to paste the URL supplied by your provider or local tool. Choose **Host & credentials** to configure each field separately and reveal engine-specific advanced settings. Removing a connection deletes Orbit's saved entry and credential; it never deletes or modifies the database itself.
 
 For gateway connections, public metadata and encrypted credential records are stored separately under `ORBIT_DATA_DIR` (default: `.orbit-data` in the gateway working directory). Credentials are never returned by the API.
 
